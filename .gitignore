@@ -1,0 +1,44 @@
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit cache
+.streamlit/cache/
+
+# Logs
+*.log
+
+# Pytest
+.pytest_cache/
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+blueprint_history.db
+
+# ChromaDB generated data
+chroma_db/
+backend/chroma_db/
+
+# Source PDFs / RAG documents
+data/

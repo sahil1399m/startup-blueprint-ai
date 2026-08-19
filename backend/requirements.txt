@@ -1,0 +1,68 @@
+# ═══════════════════════════════════════════════════════════
+# backend/requirements.txt
+# Complete dependency list for the FastAPI backend.
+#
+# Merges your existing Streamlit app packages with the
+# new FastAPI / web server packages.
+#
+# Install: pip install -r requirements.txt
+# ═══════════════════════════════════════════════════════════
+
+# ── Web framework (NEW) ──────────────────────────────────────
+fastapi[standard]==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# ── Async HTTP client (NEW) ──────────────────────────────────
+httpx==0.27.2
+
+# ── Config & env (NEW) ───────────────────────────────────────
+pydantic==2.9.2
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# ── Auth ─────────────────────────────────────────────────────
+PyJWT==2.10.1
+
+# ── IBM Granite (your pinned version) ────────────────────────
+ibm-watsonx-ai==1.5.14
+
+# ── Google Gemini ─────────────────────────────────────────────
+google-generativeai
+google-genai
+
+# ── Groq ─────────────────────────────────────────────────────
+groq
+
+# ── Tavily ───────────────────────────────────────────────────
+tavily-python
+
+# ── Embeddings & Reranker ────────────────────────────────────
+sentence-transformers
+transformers
+torch
+
+# ── Vector store ─────────────────────────────────────────────
+chromadb==0.6.3
+
+# ── HuggingFace Hub (NEW — ChromaDB download on startup) ─────
+huggingface-hub>=0.26.2
+
+# ── PDF ingestion ─────────────────────────────────────────────
+pypdf
+pdfplumber
+Pillow
+
+# ── Data ─────────────────────────────────────────────────────
+pandas
+numpy
+
+# ── HTTP / news ───────────────────────────────────────────────
+requests
+
+# ── Database ─────────────────────────────────────────────────
+psycopg2-binary
+
+# ── Scheduling / Background Tasks ───────────────────────────
+apscheduler>=3.10.4
+tzlocal>=5.0

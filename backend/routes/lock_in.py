@@ -1,0 +1,633 @@
+"""
+routes/lock_in.py — Lock-In Roadmap generation endpoint.
+
+Uses Groq Llama-3.3-70B + Tavily web search to generate a detailed,
+personalised execution roadmap grounded in the user's actual blueprint data.
+"""
+from __future__ import annotations
+import json
+import logging
+from typing import Dict, List, Optional
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from auth_middleware import get_current_user
+from dependencies import get_groq, get_tavily
+
+log    = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/lock-in", tags=["lock-in"])
+
+
+class LockInRequest(BaseModel):
+    blueprint_id:     int
+    # Founder Details
+    founder_name:     str = ""
+    technical_bg:     str = "Moderate"      # None/Moderate/Strong(Dev)/Strong(AI)
+    business_bg:      str = "Moderate"      # None/Moderate/Strong(MBA)/Strong(Sales)
+    startup_exp:      str = "First startup" # First/1-2 before/Serial
+    team_size:        str = "1 (Solo)"
+    city:             str = "Mumbai"
+    # Startup Status
+    current_stage:    str = "Idea Only"    # Idea Only/Prototype/MVP/Early Revenue
+    available_budget: str = "Bootstrapped (< ₹10K)"
+    funding_status:   str = "Self Funded"
+    # Goals & Commitment
+    primary_goal:     str = "Launch MVP"
+    time_commitment:  str = "Part Time"    # Part Time/Full Time/Weekend Only
+    roadmap_duration: str = "3 Months"    # 3/6/12 Months
+    weekly_hours:     int = 20
+    # Team & Resources
+    team_members:     List[str] = []       # ["Co-founder (Tech)", "Designer", ...]
+    existing_assets:  List[str] = []       # ["Domain name", "Prototype", "Customers", ...]
+    # Confidence ratings (1-5)
+    conf_programming: int = 3
+    conf_ai_ml:       int = 2
+    conf_finance:     int = 2
+    conf_marketing:   int = 2
+    conf_sales:       int = 2
+    conf_product_mgmt:int = 3
+
+
+@router.post("/generate")
+async def generate_lock_in_roadmap(
+    body:         LockInRequest,
+    current_user: Dict        = Depends(get_current_user),
+    groq_client               = Depends(get_groq),
+    tavily                    = Depends(get_tavily),
+):
+    """
+    Generate a detailed, personalised execution roadmap using:
+    1. The user's blueprint data (sector, BMC, budget, GTM, etc.)
+    2. The founder's profile form data
+    3. Live Tavily web searches for sector-specific insights
+    4. Groq Llama-3.3-70B for roadmap generation
+    """
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
+    from history import load_blueprint_for_display
+
+    # ── 1. Load blueprint ──────────────────────────────────────────────────
+    bp = load_blueprint_for_display(body.blueprint_id)
+    if not bp:
+        raise HTTPException(404, "Blueprint not found")
+
+    idea     = bp.get("original_query", "")
+    sector   = bp.get("sector", "startup")
+    stage    = bp.get("stage", "Idea Stage")
+    bmc      = bp.get("bmc_data",       {})
+    budget   = bp.get("budget_data",    {})
+    gtm      = bp.get("gtm_data",       {})
+    investors= bp.get("investor_data",  {})
+    risks    = bp.get("risk_data",      {})
+
+    # ── 2. Tavily live research (3 targeted searches) ──────────────────────
+    web_insights = []
+    duration_weeks = {"3 Months": 12, "6 Months": 24, "12 Months": 48}.get(body.roadmap_duration, 12)
+
+    searches = [
+        f"{sector} startup {body.current_stage} execution roadmap India 2025",
+        f"{sector} startup week by week action plan {body.primary_goal.lower()} India",
+        f"{sector} India startup {body.primary_goal.lower()} tips founder guide",
+    ]
+
+    for q in searches:
+        try:
+            res = tavily.search(
+                query=q,
+                search_depth="basic",
+                max_results=4,
+                include_domains=[
+                    "inc42.com", "yourstory.com", "startupindia.gov.in",
+                    "entrackr.com", "nasscom.in", "economictimes.indiatimes.com",
+                    "firstround.com", "paulgraham.com"
+                ]
+            )
+            for r in res.get("results", [])[:3]:
+                web_insights.append({
+                    "title":   r.get("title", ""),
+                    "excerpt": r.get("content", "")[:400],
+                    "url":     r.get("url", ""),
+                })
+        except Exception as e:
+            log.warning(f"Tavily search failed for '{q}': {e}")
+
+    web_context = "\n\n".join([
+        f"[{r['title']}]\n{r['excerpt']}"
+        for r in web_insights[:9]
+    ])
+
+    # ── 3. Build the prompt ────────────────────────────────────────────────
+    num_weeks = duration_weeks
+
+    # Determine weaknesses from confidence ratings
+    skills = {
+        "Programming":       body.conf_programming,
+        "AI/ML":             body.conf_ai_ml,
+        "Finance":           body.conf_finance,
+        "Marketing":         body.conf_marketing,
+        "Sales":             body.conf_sales,
+        "Product Management":body.conf_product_mgmt,
+    }
+    weak_areas  = [k for k, v in skills.items() if v <= 2]
+    strong_areas= [k for k, v in skills.items() if v >= 4]
+
+    budget_phases = budget.get("phases", [])
+    phase1_budget = budget_phases[0].get("total", 0) if budget_phases else 0
+    phase1_items  = budget_phases[0].get("items", []) if budget_phases else []
+
+    gtm_channels  = [c.get("channel","") for c in gtm.get("growth_channels", [])[:4]]
+    gtm_launch    = gtm.get("launch_strategy", [])[:4]
+    key_metrics   = gtm.get("key_metrics", [])[:4]
+    revenue_streams = bmc.get("revenue_streams", [])[:3]
+    key_activities  = bmc.get("key_activities", [])[:4]
+    govt_schemes    = [s.get("name","") for s in investors.get("government_schemes", [])[:3]]
+    top_risks       = [r.get("risk","") for r in risks.get("risks", [])[:3]]
+
+    prompt = f"""You are an elite startup execution coach for Indian founders with 15 years of experience.
+Generate a DETAILED, PERSONALISED {num_weeks}-week execution roadmap.
+
+═══════════════════════════════════════════════
+FOUNDER PROFILE
+═══════════════════════════════════════════════
+Name: {body.founder_name or "Founder"}
+City: {body.city}
+Team: {body.team_size} | Team members: {', '.join(body.team_members) if body.team_members else 'None yet'}
+Technical background: {body.technical_bg}
+Business background: {body.business_bg}
+Startup experience: {body.startup_exp}
+Weekly hours available: {body.weekly_hours} hrs/week ({body.time_commitment})
+Current stage: {body.current_stage}
+Available budget: {body.available_budget}
+Funding status: {body.funding_status}
+Primary goal: {body.primary_goal}
+Roadmap duration: {body.roadmap_duration}
+
+Skill confidence (1=lowest, 5=highest):
+{chr(10).join([f"  {k}: {v}/5" for k, v in skills.items()])}
+Strong areas: {', '.join(strong_areas) if strong_areas else 'None identified'}
+Areas needing support: {', '.join(weak_areas) if weak_areas else 'None'}
+Existing assets: {', '.join(body.existing_assets) if body.existing_assets else 'Starting from scratch'}
+
+═══════════════════════════════════════════════
+STARTUP BLUEPRINT
+═══════════════════════════════════════════════
+Startup Idea: {idea}
+Sector: {sector} | Stage: {stage}
+
+Revenue streams: {', '.join(revenue_streams) if revenue_streams else 'TBD'}
+Key activities: {', '.join(key_activities) if key_activities else 'TBD'}
+Phase 1 budget: ₹{phase1_budget:,.0f}
+Budget items: {', '.join([i.get('item','') for i in phase1_items[:4]])}
+
+GTM channels: {', '.join(gtm_channels) if gtm_channels else 'TBD'}
+Launch steps: {' → '.join(gtm_launch) if gtm_launch else 'TBD'}
+Key metrics: {', '.join(key_metrics) if key_metrics else 'TBD'}
+
+Government schemes available: {', '.join(govt_schemes) if govt_schemes else 'None identified'}
+Top risks to mitigate: {', '.join(top_risks) if top_risks else 'None identified'}
+
+═══════════════════════════════════════════════
+LIVE MARKET INTELLIGENCE (from web research)
+═══════════════════════════════════════════════
+{web_context if web_context else "No live context available — use general best practices."}
+
+═══════════════════════════════════════════════
+GENERATION INSTRUCTIONS
+═══════════════════════════════════════════════
+Create a {num_weeks}-week roadmap where:
+- Each week has a specific THEME (not just "Week N")
+- Each week has 4-6 SPECIFIC, ACTIONABLE tasks (not generic advice)
+- Tasks are adapted to founder's skill profile — if Marketing is weak (rated {body.conf_marketing}/5),
+  include learning/hiring tasks; if strong, go straight to execution
+- Tasks reference the actual startup idea, not placeholders
+- Include specific tools, platforms, or resources for each task
+- Budget tasks reference the actual budget constraints (₹{phase1_budget:,.0f} phase 1)
+- GTM tasks reference the actual channels identified
+- Include risk mitigation tasks for the top identified risks
+- If govt schemes were found, include application tasks in the roadmap
+- Account for weekly hours: {body.weekly_hours} hrs/week means ~{body.weekly_hours//5} hrs/day
+
+Task categories:
+  build     = product/tech development
+  market    = marketing, content, social media
+  fund      = fundraising, grants, govt schemes
+  legal     = legal, compliance, registration
+  ops       = operations, admin, finance
+  learn     = skill building, research, networking
+  validate  = customer interviews, testing, feedback
+
+Return ONLY valid JSON, no markdown, no explanation:
+
+{{
+  "title": "Personalised {num_weeks}-Week Roadmap for [specific startup type]",
+  "founder_name": "{body.founder_name or 'Founder'}",
+  "sector": "{sector}",
+  "primary_goal": "{body.primary_goal}",
+  "duration": "{body.roadmap_duration}",
+  "total_tasks": <number>,
+  "summary": "2-3 sentence personalised executive summary explaining the roadmap strategy based on this founder's specific profile and startup idea",
+  "key_focus_areas": ["area1", "area2", "area3"],
+  "milestones": [
+    {{"week": 4,  "title": "Milestone 1 title", "description": "What should be achieved"}},
+    {{"week": 8,  "title": "Milestone 2 title", "description": "What should be achieved"}},
+    {{"week": {num_weeks}, "title": "Final milestone", "description": "End state"}}
+  ],
+  "weeks": [
+    {{
+      "week": 1,
+      "theme": "Specific week theme",
+      "focus": "Primary focus area for this week",
+      "objective": "What success looks like at end of this week",
+      "estimated_hours": <number based on {body.weekly_hours} hrs/week>,
+      "tasks": [
+        {{
+          "id": "w1t1",
+          "task": "Specific actionable task with clear deliverable",
+          "details": "HOW to do this — specific steps, tools, or resources",
+          "category": "build|market|fund|legal|ops|learn|validate",
+          "priority": "must|should|nice",
+          "hours": <estimated hours>,
+          "resources": ["specific tool/link/resource"],
+          "outcome": "What you'll have when done"
+        }}
+      ]
+    }}
+  ],
+  "weekly_rhythm": "Suggested daily schedule for {body.weekly_hours} hrs/week",
+  "skill_gap_plan": {{
+    "gaps": {json.dumps(weak_areas)},
+    "recommendations": ["specific recommendation for each gap area"]
+  }},
+  "govt_scheme_actions": {json.dumps(govt_schemes)},
+  "risk_mitigation": {json.dumps(top_risks)},
+  "success_metrics": ["metric1", "metric2", "metric3", "metric4"]
+}}"""
+
+    # ── 4. Call Groq ───────────────────────────────────────────────────────
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.35,
+            max_tokens=6000,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        roadmap = json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error(f"Groq returned invalid JSON: {e}")
+        raise HTTPException(500, "Roadmap generation failed — invalid response format")
+    except Exception as e:
+        log.error(f"Groq call failed: {e}")
+        raise HTTPException(500, f"Roadmap generation failed: {str(e)}")
+
+    return {
+        "roadmap":     roadmap,
+        "web_sources": web_insights[:6],
+        "blueprint_id":body.blueprint_id,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — LOCK IN AI ACCOUNTABILITY AGENT ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+from fastapi.responses import RedirectResponse
+from config import get_settings
+from lock_in_db import (
+    sync_project as db_sync_project,
+    get_project,
+    get_project_by_id,
+    get_preferences as db_get_preferences,
+    update_preferences as db_update_preferences,
+    get_gmail_connection,
+    save_gmail_connection,
+    disconnect_gmail as db_disconnect_gmail,
+    get_agent_actions,
+    get_pending_recommendations,
+    approve_agent_action,
+    reject_agent_action,
+    get_notifications,
+)
+from gmail_service import (
+    build_google_auth_url,
+    exchange_oauth_code,
+    send_test_email,
+    is_gmail_configured,
+)
+from lock_in_agent_runner import (
+    analyze_project_progress,
+    evaluate_and_execute_agent,
+)
+
+
+class SyncRoadmapRequest(BaseModel):
+    blueprint_id:    int
+    roadmap:         Dict[str, Any]
+    completed_tasks: List[str] = []
+
+
+class PreferencesUpdateRequest(BaseModel):
+    email_enabled:          Optional[bool] = True
+    daily_reminder_enabled: Optional[bool] = True
+    deadline_alert_enabled: Optional[bool] = True
+    weekly_report_enabled:  Optional[bool] = True
+    recovery_enabled:       Optional[bool] = True
+    reminder_time:          Optional[str] = "09:00"
+    timezone:               Optional[str] = "Asia/Kolkata"
+
+
+@router.post("/sync")
+async def sync_roadmap_state(
+    body:         SyncRoadmapRequest,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Synchronize roadmap structure and task completion state between frontend and backend.
+    Ensures the backend agent has the full context for scheduled offline evaluation.
+    """
+    user_id = current_user["id"]
+    user_email = current_user["email"]
+
+    try:
+        project = db_sync_project(
+            user_id=user_id,
+            user_email=user_email,
+            blueprint_id=body.blueprint_id,
+            roadmap_data=body.roadmap,
+            completed_task_ids=body.completed_tasks,
+        )
+        return {"status": "synced", "project_id": project["id"]}
+    except Exception as e:
+        log.error(f"Error syncing project roadmap: {e}")
+        raise HTTPException(500, f"Failed to sync roadmap state: {str(e)}")
+
+
+@router.get("/status/{blueprint_id}")
+async def get_lock_in_status(
+    blueprint_id: int,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Retrieves complete agent status: progress metrics, deterministic score, state,
+    Gmail connection status, preferences, pending recommendations, and recent activity.
+    """
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+
+    gmail_conn = get_gmail_connection(user_id)
+    gmail_status = {
+        "connected": bool(gmail_conn and gmail_conn.get("status") == "active"),
+        "google_email": gmail_conn.get("google_email") if gmail_conn else None,
+        "status": gmail_conn.get("status") if gmail_conn else "not_connected",
+        "oauth_configured": is_gmail_configured(),
+    }
+
+    if not project:
+        return {
+            "synced": False,
+            "gmail": gmail_status,
+            "metrics": None,
+            "preferences": None,
+            "pending_recommendations": [],
+            "recent_activity": [],
+        }
+
+    project_id = project["id"]
+    metrics = analyze_project_progress(project_id)
+    prefs = db_get_preferences(project_id, user_id)
+    pending_recs = get_pending_recommendations(project_id, user_id)
+    activities = get_agent_actions(project_id, user_id, limit=10)
+
+    return {
+        "synced": True,
+        "project_id": project_id,
+        "gmail": gmail_status,
+        "metrics": metrics,
+        "preferences": prefs,
+        "pending_recommendations": pending_recs,
+        "recent_activity": activities,
+    }
+
+
+@router.get("/gmail/connect")
+async def connect_gmail(
+    blueprint_id: int,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Generates a secure Google OAuth authorization URL for offline Gmail sending.
+    """
+    user_id = current_user["id"]
+    settings = get_settings()
+
+    # State parameter carries user_id and blueprint_id securely for CSRF protection and callback routing
+    state_payload = json.dumps({"user_id": user_id, "blueprint_id": blueprint_id})
+    import base64
+    state_b64 = base64.urlsafe_b64encode(state_payload.encode()).decode()
+
+    try:
+        auth_url = build_google_auth_url(user_id=user_id, state_token=state_b64)
+        return {"auth_url": auth_url}
+    except Exception as e:
+        log.error(f"Failed to generate Google auth URL: {e}")
+        raise HTTPException(400, str(e))
+
+
+@router.get("/gmail/callback")
+async def gmail_oauth_callback(
+    code:  Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """
+    Handles Google OAuth callback, exchanges authorization code for tokens,
+    persists credentials server-side, and redirects back to the LOCK IN page.
+    """
+    settings = get_settings()
+    frontend_url = settings.FRONTEND_URL
+
+    if error:
+        log.error(f"Google OAuth callback error: {error}")
+        return RedirectResponse(f"{frontend_url}/home?gmail_error={error}")
+
+    if not code or not state:
+        return RedirectResponse(f"{frontend_url}/home?gmail_error=missing_code_or_state")
+
+    import base64
+    try:
+        state_data = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+        user_id = state_data.get("user_id")
+        blueprint_id = state_data.get("blueprint_id", "")
+    except Exception:
+        return RedirectResponse(f"{frontend_url}/home?gmail_error=invalid_state")
+
+    try:
+        token_info = await exchange_oauth_code(code)
+        save_gmail_connection(
+            user_id=user_id,
+            user_email="", # Updated from google profile or user token
+            google_email=token_info["google_email"],
+            access_token=token_info["access_token"],
+            refresh_token=token_info["refresh_token"],
+            token_expiry=token_info["token_expiry"],
+            status="active"
+        )
+        target_path = f"/lock-in/{blueprint_id}?gmail=connected" if blueprint_id else "/home?gmail=connected"
+        return RedirectResponse(f"{frontend_url}{target_path}")
+
+    except Exception as e:
+        log.error(f"Error handling Google OAuth callback: {e}")
+        target_path = f"/lock-in/{blueprint_id}?gmail_error=auth_failed" if blueprint_id else "/home?gmail_error=auth_failed"
+        return RedirectResponse(f"{frontend_url}{target_path}")
+
+
+@router.post("/gmail/test")
+async def send_test_notification(
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Sends a real verification test email through the user's connected Gmail account.
+    """
+    user_id = current_user["id"]
+    try:
+        res = await send_test_email(user_id)
+        return res
+    except Exception as e:
+        log.error(f"Test email failed: {e}")
+        raise HTTPException(400, f"Failed to send test email: {str(e)}")
+
+
+@router.post("/gmail/disconnect")
+async def disconnect_user_gmail(
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Disconnects the user's Gmail connection while preserving all roadmaps and task states.
+    """
+    user_id = current_user["id"]
+    db_disconnect_gmail(user_id)
+    return {"status": "disconnected"}
+
+
+@router.get("/{blueprint_id}/preferences")
+async def get_notification_preferences(
+    blueprint_id: int,
+    current_user: Dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+    if not project:
+        raise HTTPException(404, "Lock-in project not found. Please generate or sync your roadmap first.")
+    prefs = db_get_preferences(project["id"], user_id)
+    return prefs
+
+
+@router.put("/{blueprint_id}/preferences")
+async def update_notification_preferences(
+    blueprint_id: int,
+    body:         PreferencesUpdateRequest,
+    current_user: Dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+    if not project:
+        raise HTTPException(404, "Lock-in project not found. Please sync your roadmap first.")
+    
+    updated = db_update_preferences(project["id"], user_id, body.model_dump(exclude_unset=True))
+    return updated
+
+
+@router.get("/{blueprint_id}/activity")
+async def get_project_activity_logs(
+    blueprint_id: int,
+    current_user: Dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+    if not project:
+        return {"actions": [], "notifications": []}
+    
+    actions = get_agent_actions(project["id"], user_id, limit=25)
+    notifications = get_notifications(project["id"], user_id, limit=25)
+    return {"actions": actions, "notifications": notifications}
+
+
+@router.get("/{blueprint_id}/recommendations")
+async def get_recommendations(
+    blueprint_id: int,
+    current_user: Dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+    if not project:
+        return {"pending": []}
+    
+    pending = get_pending_recommendations(project["id"], user_id)
+    return {"pending": pending}
+
+
+@router.post("/{blueprint_id}/recommendations/{action_id}/approve")
+async def approve_recommendation(
+    blueprint_id: int,
+    action_id:    int,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Human-in-the-Loop (HITL) approval:
+    Applies the proposed task moves/schedule adjustments to the roadmap in the database
+    and returns the updated roadmap.
+    """
+    user_id = current_user["id"]
+    approved = approve_agent_action(action_id, user_id)
+    if not approved:
+        raise HTTPException(404, "Recommendation not found or already processed.")
+    
+    # Reload fresh project with updated roadmap
+    project = get_project(user_id, blueprint_id)
+    return {
+        "status": "approved",
+        "action": approved,
+        "updated_roadmap": project.get("roadmap_data") if project else None,
+    }
+
+
+@router.post("/{blueprint_id}/recommendations/{action_id}/reject")
+async def reject_recommendation(
+    blueprint_id: int,
+    action_id:    int,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Rejects the recommendation and preserves the roadmap without modification.
+    """
+    user_id = current_user["id"]
+    rejected = reject_agent_action(action_id, user_id)
+    if not rejected:
+        raise HTTPException(404, "Recommendation not found or already processed.")
+    return {"status": "rejected", "action": rejected}
+
+
+@router.post("/{blueprint_id}/run-agent-now")
+async def manually_trigger_agent_evaluation(
+    blueprint_id: int,
+    notification_type: str = "daily",
+    current_user: Dict = Depends(get_current_user),
+    groq_client = Depends(get_groq),
+):
+    """
+    Manually triggers an agent evaluation cycle for testing / on-demand review.
+    Forces sending regardless of scheduled time window.
+    """
+    user_id = current_user["id"]
+    project = get_project(user_id, blueprint_id)
+    if not project:
+        raise HTTPException(404, "Project not synced with backend yet.")
+
+    res = await evaluate_and_execute_agent(
+        project_id=project["id"],
+        notification_type=notification_type,
+        force_send=True,
+        groq_client=groq_client,
+    )
+    return res
+

@@ -1,0 +1,59 @@
+# ==============================================================================
+# Docker Compose for LOCK IN AI Production Stack
+# Services: Backend (FastAPI + APScheduler) + Frontend (Nginx + React)
+# Database: Supabase PostgreSQL (external cloud service)
+# ==============================================================================
+
+
+services:
+  # ── Backend: FastAPI Application + APScheduler ─────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: lockin-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+      - PORT=8000
+      - CHROMA_LOCAL_PATH=/app/chroma_db
+      - ALLOWED_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173,http://127.0.0.1
+    volumes:
+      # Persistent ChromaDB storage across container rebuilds and restarts
+      - chroma_data:/app/chroma_db
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    networks:
+      - lockin-network
+
+  # ── Frontend: React SPA + Nginx Reverse Proxy ──────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: lockin-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - lockin-network
+
+# ── Volumes & Networks ────────────────────────────────────────────────────────
+volumes:
+  chroma_data:
+    driver: local
+
+networks:
+  lockin-network:
+    driver: bridge
