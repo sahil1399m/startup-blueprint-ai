@@ -857,7 +857,7 @@ You MUST respond with ONLY a single valid JSON object matching this exact schema
                     {"role": "user",   "content": user_prompt},
                 ],
                 temperature=0.3,
-                max_tokens=4500,
+                max_tokens=3500,
                 response_format={"type": "json_object"},
             )
             res = json.loads(r.choices[0].message.content)
