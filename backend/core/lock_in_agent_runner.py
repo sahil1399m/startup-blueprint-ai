@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, date, timedelta, timezone
 import zoneinfo
 from typing import Dict, Any, List, Optional
+from config import get_settings
 import os
 
 from lock_in_db import (
@@ -193,7 +194,7 @@ def _call_llm_json_or_text(groq_client, prompt: str, system: str = "") -> str:
     if groq_client:
         try:
             resp = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system or "You are an elite, highly supportive startup execution coach."},
                     {"role": "user", "content": prompt}

@@ -1,8 +1,8 @@
 """
 mentor/intent_classifier.py
 ────────────────────────────
-Classifies a user question into one of 14 mentor intents using Groq
-Llama 3.3.  Returns a structured result consumed by tool_router.py.
+Classifies a user question into one of 14 mentor intents using Groq.
+Returns a structured result consumed by tool_router.py.
 
 Intents
 ───────
@@ -16,6 +16,8 @@ INVESTOR_PREP         EXECUTION_ROADMAP   GENERAL
 from __future__ import annotations
 import json
 import re
+
+from config import get_settings
 
 INTENTS = [
     "MARKET_VALIDATION",
@@ -109,7 +111,7 @@ def classify_intent(
         except Exception as e:
             print(f"[IntentClassifier] GPT-OSS failed, using Groq fallback: {e}")
             resp = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user",   "content": user_msg},

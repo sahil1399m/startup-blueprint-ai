@@ -9,6 +9,8 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from config import get_settings
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -18,7 +20,7 @@ def _groq_json(groq_client, system: str, user: str, max_tokens=2000) -> dict:
     for attempt in range(3):
         try:
             resp = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},

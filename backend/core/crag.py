@@ -53,6 +53,8 @@ from groq import Groq
 import google.generativeai as genai
 from google import genai as genai_new
 
+from config import get_settings
+
 load_dotenv()
 
 # ── Thresholds (calibrated on raw CrossEncoder logits, NOT sigmoid) ───────────
@@ -849,7 +851,7 @@ You MUST respond with ONLY a single valid JSON object matching this exact schema
         print(f"[CRAG Blueprint] GPT-OSS-120B failed, using Groq fallback: {e}")
         try:
             r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
@@ -947,7 +949,7 @@ def node_conversational_answer(structured_brief, web_results, groq_client, gpt_o
         except Exception as e:
             print(f"[CRAG Conversational] GPT-OSS-120B failed, using Groq fallback: {e}")
             r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=800,

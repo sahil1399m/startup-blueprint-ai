@@ -12,6 +12,8 @@ from __future__ import annotations
 import streamlit as st
 import json
 
+from config import get_settings
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STYLES
@@ -232,7 +234,7 @@ QUICK_QUESTIONS = [
 def _ask_doubt(question: str, groq_client) -> str:
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=get_settings().GROQ_MODEL,
             messages=[
                 {"role": "system", "content": DOUBT_SYSTEM},
                 {"role": "user", "content": question},
@@ -480,7 +482,7 @@ def render_home_page(user: dict, groq_client) -> None:
         st.markdown(
             '<div style="padding-top:0.35rem">'
             '<span class="badge badge-ibm">IBM Granite 4.0</span>'
-            '<span class="badge badge-groq">Groq Llama 3.3</span>'
+            '<span class="badge badge-groq">Groq GPT-OSS-120B</span>'
             '<span class="badge badge-gemini">✨ Gemini</span>'
             '</div>',
             unsafe_allow_html=True,
@@ -517,7 +519,7 @@ def render_home_page(user: dict, groq_client) -> None:
         f'learn the fundamentals, solve doubts, and run financial calculations — all in one place.</div>'
         f'<div>'
         f'<span class="badge badge-ibm">IBM Granite 4.0</span>'
-        f'<span class="badge badge-groq">Groq Llama 3.3</span>'
+        f'<span class="badge badge-groq">Groq GPT-OSS-120B</span>'
         f'<span class="badge badge-gemini">✨ Gemini Flash</span>'
         f'<span class="badge badge-rag">CRAG Self-Correcting RAG</span>'
         f'<span class="badge badge-live">🔴 Tavily Live Search</span>'

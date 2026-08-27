@@ -4,7 +4,7 @@ mentor/mentor_agent.py
 Main orchestrator for the AI Startup Mentor.
 
 Flow per user question:
-  1. Classify intent (Groq Llama 3.3)
+  1. Classify intent (Groq LLM)
   2. Route to tools (blueprint + optional chromadb + optional tavily)
   3. Synthesize grounded answer (IBM Granite 4.0)
   4. Persist to mentor_db (SQLite)

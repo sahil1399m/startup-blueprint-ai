@@ -113,7 +113,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "AI-powered startup blueprint generator. "
-        "Built with IBM Granite 4.0, Groq Llama 3.3, Gemini Flash, and C-RAG."
+        "Built with IBM Granite 4.0, Groq GPT-OSS-120B, Gemini Flash, and C-RAG."
     ),
     lifespan=lifespan,
     docs_url="/docs" if not settings.is_production else None,   # hide Swagger in prod

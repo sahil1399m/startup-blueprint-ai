@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # ── Groq ─────────────────────────────────────────────────────────────────
     GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "openai/gpt-oss-120b"  # Replaces deprecated llama-3.3-70b-versatile
 
     # ── Google Gemini ─────────────────────────────────────────────────────────
     GOOGLE_API_KEY: str = ""

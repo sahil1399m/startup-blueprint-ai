@@ -1,7 +1,7 @@
 """
 routes/lock_in.py — Lock-In Roadmap generation endpoint.
 
-Uses Groq Llama-3.3-70B + Tavily web search to generate a detailed,
+Uses Groq (model from config) + Tavily web search to generate a detailed,
 personalised execution roadmap grounded in the user's actual blueprint data.
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from auth_middleware import get_current_user
 from dependencies import get_groq, get_tavily
+from config import get_settings
 
 log    = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/lock-in", tags=["lock-in"])
@@ -59,7 +60,7 @@ async def generate_lock_in_roadmap(
     1. The user's blueprint data (sector, BMC, budget, GTM, etc.)
     2. The founder's profile form data
     3. Live Tavily web searches for sector-specific insights
-    4. Groq Llama-3.3-70B for roadmap generation
+    4. Groq LLM for roadmap generation
     """
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
@@ -265,7 +266,7 @@ Return ONLY valid JSON, no markdown, no explanation:
     # ── 4. Call Groq ───────────────────────────────────────────────────────
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=get_settings().GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.35,
             max_tokens=6000,

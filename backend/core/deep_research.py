@@ -23,6 +23,8 @@ import logging
 import time
 from typing import Dict, List, Any, AsyncGenerator
 
+from config import get_settings
+
 log = logging.getLogger(__name__)
 
 # In-memory research report cache strictly keyed by (blueprint_id:mode)
@@ -679,7 +681,7 @@ def _validate_and_repair_report(report_data: dict, norm_focus: str, blueprint: d
                     "phase": "AI Model & Engine Pipeline Integration",
                     "timeline": "Month 2–4",
                     "milestones": [f"Integrate RAG vector search & AI engine for {sector}"],
-                    "stack": ["ChromaDB Vector DB", "Groq Llama 3.3", "LangChain"],
+                    "stack": ["ChromaDB Vector DB", "Groq GPT-OSS-120B", "LangChain"],
                     "scalability_actions": ["Async Celery/Redis worker queues"],
                     "security_checks": ["Prompt injection guardrails", "Data anonymization"]
                 },
@@ -705,7 +707,7 @@ def synthesize_deep_research_with_groq(
 ) -> dict:
     """
     Synthesizes blueprint, internal ChromaDB evidence, and Tavily web research
-    into a specialized Startup Intelligence Report using Groq (llama-3.3-70b-versatile).
+    into a specialized Startup Intelligence Report using Groq.
     """
     idea = blueprint.get("original_query", "")
     sector = blueprint.get("sector", "Fintech")
@@ -754,7 +756,7 @@ Produce the specialized {report_title} in JSON format."""
     for attempt in range(3):
         try:
             resp = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=get_settings().GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -857,7 +859,7 @@ async def run_deep_research_stream(
         yield sse("progress", {"module": "Web Intelligence Collection Completed", "pct": 70, "status": "completed", "message": f"Retrieved {len(web_evidence)} web sources"})
 
         # Stage 3: Groq Synthesis
-        yield sse("progress", {"module": f"Groq Llama 3.3 Synthesizing {norm_focus} Report", "pct": 85, "status": "running", "message": "Synthesizing specialized report via Groq"})
+        yield sse("progress", {"module": f"Groq Synthesizing {norm_focus} Report", "pct": 85, "status": "running", "message": "Synthesizing specialized report via Groq"})
         report_data = await asyncio.to_thread(
             synthesize_deep_research_with_groq,
             groq_client,

@@ -121,7 +121,7 @@ async def _stream_blueprint(
         # ── Step 6: Groq blueprint sections ──────────────────────────────────
         blueprint_data = {}
         if crag_result["should_generate_blueprint"]:
-            yield _sse("progress", step="Groq Llama 3.3 generating Business Model Canvas…",
+            yield _sse("progress", step="Groq generating Business Model Canvas…",
                        node="generate_bmc", progress=62)
             yield _sse("progress", step="Groq generating budget estimate…",
                        node="generate_budget", progress=70)
