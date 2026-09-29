@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://startup-blueprint-ai-production.up.railway.app/api/$1"
+      "destination": "https://startup-blueprint-ai-production-c87b.up.railway.app/api/$1"
     }
   ]
 }
