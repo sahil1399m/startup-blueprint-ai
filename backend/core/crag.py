@@ -43,7 +43,7 @@ import time
 import json
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Any, Dict, List
 from dotenv import load_dotenv
 from sentence_transformers import CrossEncoder
 import chromadb
@@ -63,6 +63,30 @@ load_dotenv()
 UPPER_THRESHOLD = -4.0   # logit ≥ this  → CORRECT
 LOWER_THRESHOLD = -7.5   # logit < this  → INCORRECT
                          # between       → AMBIGUOUS
+
+# ── Gemini 429 Cooldown Cache ────────────────────────────────────────────────
+_gemini_cooldown_until = 0.0
+
+def _is_gemini_available() -> bool:
+    global _gemini_cooldown_until
+    return time.time() >= _gemini_cooldown_until
+
+def _set_gemini_cooldown(seconds: int = 300):
+    global _gemini_cooldown_until
+    _gemini_cooldown_until = time.time() + seconds
+    print(f"[CRAG] Gemini quota exceeded (429). Setting cooldown for {seconds}s — bypassing Gemini to Groq fallback.")
+
+# ── IBM 429 Cooldown Cache ───────────────────────────────────────────────────
+_ibm_cooldown_until = 0.0
+
+def _is_ibm_available() -> bool:
+    global _ibm_cooldown_until
+    return time.time() >= _ibm_cooldown_until
+
+def _set_ibm_cooldown(seconds: int = 120):
+    global _ibm_cooldown_until
+    _ibm_cooldown_until = time.time() + seconds
+    print(f"[CRAG] IBM rate-limited (429). Setting cooldown for {seconds}s — bypassing IBM to Groq fallback.")
 
 # ── Lazy Gemini client singleton ──────────────────────────────────────────────
 _gemini_embed_client = None
@@ -163,52 +187,95 @@ SEARCH CONTEXT:
 [One 60-80 word retrieval-focused paragraph combining every important concept naturally.]
 """
 
-    try:
-        model    = gemini_client.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(
-            contents=prompt,   # BUG FIX: was missing from original — prompt never sent
-            generation_config=genai.GenerationConfig(
-                temperature=0.0,
-                max_output_tokens=3000,
+    if _is_gemini_available():
+        try:
+            model    = gemini_client.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(
+                contents=prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.0,
+                    max_output_tokens=3000,
+                )
             )
+            rewritten = response.text.strip()
+            if len(rewritten) < 80:
+                raise ValueError("Rewrite too short")
+
+            # ── Parse sections ────────────────────────────────────────────────────
+            keywords, retrieval_queries, search_context = [], [], ""
+
+            m = re.search(r"KEYWORDS:\s*(.*?)\n\s*RETRIEVAL QUERIES:", rewritten, re.S)
+            if m:
+                keywords = [k.strip() for k in m.group(1).split(",") if k.strip()]
+
+            m = re.search(r"RETRIEVAL QUERIES:\s*(.*?)\n\s*SEARCH CONTEXT:", rewritten, re.S)
+            if m:
+                for line in m.group(1).splitlines():
+                    line = line.strip()
+                    if line and "." in line:
+                        retrieval_queries.append(line.split(".", 1)[1].strip())
+
+            m = re.search(r"SEARCH CONTEXT:\s*(.*)", rewritten, re.S)
+            if m:
+                search_context = m.group(1).strip()
+
+            return {
+                "structured_brief":  rewritten,
+                "keywords":          keywords,
+                "retrieval_queries": retrieval_queries,
+                "search_context":    search_context or query,
+            }
+
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str or "404" in err_str:
+                _set_gemini_cooldown(3600)
+            clean_err = err_str.encode('ascii', errors='replace').decode('ascii')
+            print(f"[CRAG] Gemini rewrite failed ({clean_err}), attempting Groq fallback rewrite...")
+    else:
+        print("[CRAG] Gemini rewrite skipped (quota cooldown active). Using Groq fallback directly.")
+
+    try:
+        from config import get_settings
+        from dependencies import get_groq
+        groq_cl = get_groq()
+        r = groq_cl.chat.completions.create(
+            model=get_settings().GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+            temperature=0.0
         )
-        rewritten = response.text.strip()
-        if len(rewritten) < 80:
-            raise ValueError("Rewrite too short")
+        rewritten = (r.choices[0].message.content or "").strip()
+        if len(rewritten) >= 60:
+            keywords, retrieval_queries, search_context = [], [], ""
+            m = re.search(r"KEYWORDS:\s*(.*?)\n\s*RETRIEVAL QUERIES:", rewritten, re.S)
+            if m:
+                keywords = [k.strip() for k in m.group(1).split(",") if k.strip()]
+            m = re.search(r"RETRIEVAL QUERIES:\s*(.*?)\n\s*SEARCH CONTEXT:", rewritten, re.S)
+            if m:
+                for line in m.group(1).splitlines():
+                    line = line.strip()
+                    if line and "." in line:
+                        retrieval_queries.append(line.split(".", 1)[1].strip())
+            m = re.search(r"SEARCH CONTEXT:\s*(.*)", rewritten, re.S)
+            if m:
+                search_context = m.group(1).strip()
+            print(f"[CRAG] Groq fallback rewrite succeeded ({len(retrieval_queries)} queries)!")
+            return {
+                "structured_brief":  rewritten,
+                "keywords":          keywords,
+                "retrieval_queries": retrieval_queries or [query],
+                "search_context":    search_context or query,
+            }
+    except Exception as e2:
+        print(f"[CRAG] Groq rewrite fallback also failed: {e2}")
 
-        # ── Parse sections ────────────────────────────────────────────────────
-        keywords, retrieval_queries, search_context = [], [], ""
-
-        m = re.search(r"KEYWORDS:\s*(.*?)\n\s*RETRIEVAL QUERIES:", rewritten, re.S)
-        if m:
-            keywords = [k.strip() for k in m.group(1).split(",") if k.strip()]
-
-        m = re.search(r"RETRIEVAL QUERIES:\s*(.*?)\n\s*SEARCH CONTEXT:", rewritten, re.S)
-        if m:
-            for line in m.group(1).splitlines():
-                line = line.strip()
-                if line and "." in line:
-                    retrieval_queries.append(line.split(".", 1)[1].strip())
-
-        m = re.search(r"SEARCH CONTEXT:\s*(.*)", rewritten, re.S)
-        if m:
-            search_context = m.group(1).strip()
-
-        return {
-            "structured_brief":  rewritten,
-            "keywords":          keywords,
-            "retrieval_queries": retrieval_queries,
-            "search_context":    search_context or query,
-        }
-
-    except Exception as e:
-        print(f"[CRAG] Rewrite failed: {e}")
-        return {
-            "structured_brief":  query,
-            "keywords":          [],
-            "retrieval_queries": [query],
-            "search_context":    query,
-        }
+    return {
+        "structured_brief":  query,
+        "keywords":          [],
+        "retrieval_queries": [query],
+        "search_context":    query,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -267,7 +334,7 @@ def node_eval_each_doc(query, docs, reranker):
     norm_scores = (1 / (1 + np.exp(-raw_logits))).tolist()
 
     print(f"[CRAG] Max raw logit: {max_logit:.3f}  "
-          f"(Correct≥{UPPER_THRESHOLD}, Incorrect<{LOWER_THRESHOLD})")
+          f"(Correct>={UPPER_THRESHOLD}, Incorrect<{LOWER_THRESHOLD})")
 
     if max_logit >= UPPER_THRESHOLD:
         confidence = "CORRECT"
@@ -310,16 +377,16 @@ def node_refine(query, docs, raw_logits, reranker, top_k=5):
 # ══════════════════════════════════════════════════════════════════════════════
 # NODE: web_search  (Tavily)
 # ══════════════════════════════════════════════════════════════════════════════
-def node_web_search(search_context, retrieval_queries, tavily, sector="startup", max_results=5):
+def node_web_search(search_context, retrieval_queries, tavily, sector="startup", max_results=3):
     all_results, seen_urls = [], set()
     queries = retrieval_queries if retrieval_queries else [search_context]
 
-    for q in queries[:4]:   # cap at 4 queries to avoid Tavily quota burn
+    for q in queries[:2]:   # cap at 2 queries to avoid Tavily delays and quota burn
         search_query = f"{q} India startup {sector} 2024 2025"
         try:
             results = tavily.search(
                 query=search_query,
-                search_depth="advanced",
+                search_depth="basic",
                 max_results=max_results,
                 include_domains=[
                     "startupindia.gov.in", "msme.gov.in", "aim.gov.in",
@@ -335,12 +402,12 @@ def node_web_search(search_context, retrieval_queries, tavily, sector="startup",
                 seen_urls.add(url)
                 all_results.append({
                     "title":   r.get("title", ""),
-                    "content": r.get("content", "")[:600],
+                    "content": r.get("content", "")[:350],
                     "url":     url,
                     "score":   r.get("score", 0),
                 })
         except Exception as e:
-            print(f"[CRAG] Tavily failed for '{q[:50]}': {e}")
+            print(f"[CRAG] Tavily search failed for '{q[:40]}': {e}")
 
     all_results.sort(key=lambda x: x["score"], reverse=True)
     return all_results
@@ -394,507 +461,1039 @@ def node_generate_summary(structured_brief, context, granite, context_type="inte
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NODE: generate_blueprint_sections  (Groq Llama — all 6 JSON sections)
-# Each section gets its own tailored system prompt + the structured brief +
-# relevant context. Using the rich Gemini rewrite instead of raw idea
-# dramatically improves output quality and kills hallucination.
+# HELPER: robust JSON extraction from LLM output
 # ══════════════════════════════════════════════════════════════════════════════
+_BLUEPRINT_REQUIRED_KEYS = {"bmc", "budget", "gtm", "investors", "competitors", "risks"}
+_ALL_BLUEPRINT_KEYS = {"bmc", "budget", "gtm", "investors", "competitors", "risks", "crag_trace"}
+
+
+def _parse_blueprint_json(raw: str) -> dict:
+    """
+    Parse blueprint JSON from GPT-OSS-120B output, handling common LLM quirks:
+      1. Strict json.loads
+      2. Strip markdown code fences (```json ... ```)
+      3. Extract JSON object from surrounding prose
+      4. Fix trailing commas
+      5. Validate against expected blueprint schema
+
+    Raises ValueError on unrecoverable parse failure so the caller
+    can fall through to the Groq fallback.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Empty model output")
+
+    def _is_valid_obj(obj):
+        return (isinstance(obj, dict) and len(obj) > 0) or (isinstance(obj, list) and len(obj) > 0)
+
+    # ── Attempt 1: strict parse ─────────────────────────────────────────────
+    try:
+        result = json.loads(raw)
+        if _is_valid_obj(result):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # ── Attempt 2: strip markdown code fences ───────────────────────────────
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        first_newline = cleaned.find("\n")
+        if first_newline != -1:
+            cleaned = cleaned[first_newline + 1:]
+        if cleaned.rstrip().endswith("```"):
+            cleaned = cleaned.rstrip()[:-3].rstrip()
+        try:
+            result = json.loads(cleaned)
+            if _is_valid_obj(result):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # ── Attempt 3: extract outermost { ... } with bracket balancing ─────────
+    start = raw.find("{")
+    if start != -1:
+        depth, end = 0, -1
+        in_string, escape_next = False, False
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end > start:
+            extracted = raw[start:end + 1]
+            try:
+                result = json.loads(extracted)
+                if _is_valid_obj(result):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+            # ── Attempt 4: fix trailing commas then parse again ──────────
+            fixed = re.sub(r',\s*([\]}])', r'\1', extracted)
+            try:
+                result = json.loads(fixed)
+                if _is_valid_obj(result):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+    # ── All attempts failed — raise so Groq fallback triggers ──────────────
+    snippet = raw[:300].encode('ascii', errors='replace').decode('ascii').replace("\n", "\\n")
+    raise ValueError(
+        f"Could not extract valid blueprint JSON from model output. "
+        f"Content starts with: {snippet}..."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: normalize blueprint to guarantee consistent schema
+# ══════════════════════════════════════════════════════════════════════════════
+def _normalize_blueprint(raw: dict) -> dict:
+    """
+    Ensure every blueprint section exists with the correct structure.
+    Both GPT-OSS and Groq output pass through this so the frontend
+    always receives a predictable schema.
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+
+    out = {}
+
+    # ── BMC ─────────────────────────────────────────────────────────────────
+    bmc = raw.get("bmc", {})
+    if not isinstance(bmc, dict):
+        bmc = {}
+    for key in ("key_partners", "key_resources", "key_activities",
+                "value_propositions", "customer_relationships",
+                "customer_segments", "channels", "cost_structure",
+                "revenue_streams"):
+        if key not in bmc or not isinstance(bmc[key], list):
+            bmc[key] = bmc.get(key, []) if isinstance(bmc.get(key), list) else []
+    out["bmc"] = bmc
+
+    # ── Budget ──────────────────────────────────────────────────────────────
+    budget = raw.get("budget", {})
+    if not isinstance(budget, dict):
+        budget = {}
+    if "phases" not in budget or not isinstance(budget.get("phases"), list):
+        budget["phases"] = [
+            {"name": "MVP", "duration": "Month 1-3",
+             "items": [{"item": "Development & Infrastructure", "amount": 200000}], "total": 200000},
+            {"name": "Launch", "duration": "Month 4-6",
+             "items": [{"item": "Marketing & Operations", "amount": 150000}], "total": 150000},
+            {"name": "Growth", "duration": "Month 7-12",
+             "items": [{"item": "Scaling & Hiring", "amount": 350000}], "total": 350000},
+        ]
+    # Ensure each phase has required fields
+    for phase in budget["phases"]:
+        if "items" not in phase or not isinstance(phase.get("items"), list):
+            phase["items"] = [{"item": phase.get("name", "Misc"), "amount": phase.get("total", 0)}]
+        for item in phase["items"]:
+            if "amount" not in item or not isinstance(item.get("amount"), (int, float)):
+                item["amount"] = 0
+    if "total_12_months" not in budget:
+        budget["total_12_months"] = sum(p.get("total", 0) for p in budget["phases"])
+    if "funding_suggestion" not in budget:
+        budget["funding_suggestion"] = "Startup India Seed Fund + Angel Investment"
+    out["budget"] = budget
+
+    # ── GTM ─────────────────────────────────────────────────────────────────
+    gtm = raw.get("gtm", {})
+    if not isinstance(gtm, dict):
+        gtm = {}
+    if "target_market" not in gtm:
+        gtm["target_market"] = gtm.get("target_market", "")
+    if "market_size" not in gtm:
+        gtm["market_size"] = gtm.get("market_size", "")
+    if "launch_strategy" not in gtm or not isinstance(gtm.get("launch_strategy"), list):
+        gtm["launch_strategy"] = gtm.get("launch_strategy", [])
+    if "growth_channels" not in gtm or not isinstance(gtm.get("growth_channels"), list):
+        gtm["growth_channels"] = gtm.get("growth_channels", [])
+    if "milestones" not in gtm or not isinstance(gtm.get("milestones"), list):
+        gtm["milestones"] = gtm.get("milestones", [])
+    if "key_metrics" not in gtm or not isinstance(gtm.get("key_metrics"), list):
+        gtm["key_metrics"] = gtm.get("key_metrics", [])
+    out["gtm"] = gtm
+
+    # ── Investors & Funding ──────────────────────────────────────────────────
+    investors = raw.get("investors", {})
+    if not isinstance(investors, dict):
+        investors = raw.get("funding", {}) if isinstance(raw.get("funding"), dict) else {}
+
+    if "funding_roadmap" not in investors or not isinstance(investors.get("funding_roadmap"), list) or len(investors["funding_roadmap"]) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'funding.funding_roadmap' is empty/missing")
+        investors["funding_roadmap"] = investors.get("funding_roadmap", [])
+
+    if "government_schemes" not in investors or not isinstance(investors.get("government_schemes"), list) or len(investors["government_schemes"]) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'funding.government_schemes' is empty/missing")
+        investors["government_schemes"] = investors.get("government_schemes", [])
+
+    inv_types = investors.get("investor_types") or investors.get("investor_landscape") or []
+    if not isinstance(inv_types, list) or len(inv_types) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'funding.investor_landscape' is empty/missing")
+        inv_types = []
+    investors["investor_types"] = inv_types
+    investors["investor_landscape"] = inv_types
+
+    incubators = investors.get("incubators") or investors.get("relevant_incubators") or []
+    if not isinstance(incubators, list) or len(incubators) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'funding.relevant_incubators' is empty/missing")
+        incubators = []
+    investors["incubators"] = incubators
+    investors["relevant_incubators"] = incubators
+
+    pitch_tips = investors.get("pitch_tips") or []
+    if not isinstance(pitch_tips, list) or len(pitch_tips) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'funding.pitch_tips' is empty/missing")
+        pitch_tips = []
+    investors["pitch_tips"] = pitch_tips
+
+    out["investors"] = investors
+    out["funding"] = investors
+
+    # ── Competitors ─────────────────────────────────────────────────────────
+    raw_comp = raw.get("competitors", {})
+    if isinstance(raw_comp, list):
+        competitors = {"competitors": raw_comp}
+    elif isinstance(raw_comp, dict):
+        competitors = dict(raw_comp)
+    else:
+        competitors = {}
+
+    if "competitors" not in competitors or not isinstance(competitors.get("competitors"), list) or len(competitors["competitors"]) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'competitors.competitors' is empty/missing")
+        competitors["competitors"] = competitors.get("competitors", [])
+
+    if "our_differentiators" not in competitors or not isinstance(competitors.get("our_differentiators"), list) or len(competitors["our_differentiators"]) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'competitors.our_differentiators' is empty/missing")
+        competitors["our_differentiators"] = []
+
+    if "market_gaps" not in competitors or not isinstance(competitors.get("market_gaps"), list) or len(competitors["market_gaps"]) == 0:
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'competitors.market_gaps' is empty/missing")
+        competitors["market_gaps"] = []
+
+    if "competitive_strategy" not in competitors or not competitors.get("competitive_strategy"):
+        print("[BLUEPRINT NORMALIZATION] Warning: required field 'competitors.competitive_strategy' is empty/missing")
+        competitors["competitive_strategy"] = ""
+
+    out["competitors"] = competitors
+
+    # ── Risks ───────────────────────────────────────────────────────────────
+    raw_risks = raw.get("risks", {})
+    if isinstance(raw_risks, list):
+        out["risks"] = {"risks": raw_risks}
+    elif isinstance(raw_risks, dict):
+        if "risks" not in raw_risks or not isinstance(raw_risks.get("risks"), list):
+            raw_risks["risks"] = raw_risks.get("risks", [])
+        out["risks"] = raw_risks
+    else:
+        out["risks"] = {"risks": []}
+
+    # ── CRAG Trace ──────────────────────────────────────────────────────────
+    crag_trace = raw.get("crag_trace", {})
+    if not isinstance(crag_trace, dict):
+        crag_trace = {}
+    out["crag_trace"] = crag_trace
+
+    # Preserve status and failed_sections
+    out["status"] = raw.get("status", "success")
+    out["failed_sections"] = raw.get("failed_sections", [])
+
+    # Log which sections are genuinely populated vs defaulted
+    for section in _BLUEPRINT_REQUIRED_KEYS:
+        val = out.get(section, {})
+        if not val or val == {} or (isinstance(val, dict) and all(
+            v == [] or v == "" or v == {} for v in val.values()
+        )):
+            print(f"[CRAG Blueprint] WARNING: section '{section}' is empty/defaulted")
+
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULAR SECTION GENERATION (Fast, Compact, Parallelized, Resilient)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _call_section_llm(
+    section_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    groq_client,
+    gpt_oss_client,
+    max_tokens: int = 1600,
+    temperature: float = 0.2,
+    timeout_sec: int = 15,
+) -> dict:
+    """
+    Execute a structured generation call with:
+      - Mandatory prompt & model parameter logging
+      - Strict timeout
+      - Primary IBM GPT-OSS-120B call
+      - Graceful fallback to Groq
+      - Robust JSON extraction
+    """
+    import concurrent.futures
+
+    model_id = getattr(gpt_oss_client, "model_id", "openai/gpt-oss-120b") if gpt_oss_client else "openai/gpt-oss-120b"
+    est_tokens = len(user_prompt) // 4
+    print(f"\n[BLUEPRINT MODEL CALL: {section_name.upper()}]")
+    print(f"MODEL: GPT-OSS-120B")
+    print(f"MODEL ID: {model_id}")
+    print(f"PROVIDER: IBM Watsonx")
+    print(f"INPUT TOKENS IF AVAILABLE: ~{est_tokens}")
+    print(f"MAX OUTPUT TOKENS: {max_tokens}")
+    print(f"TEMPERATURE: {temperature}")
+    print(f"TIMEOUT: {timeout_sec}s")
+
+    t0 = time.time()
+
+    # 1. Primary: IBM Watsonx GPT-OSS-120B with strict timeout
+    if gpt_oss_client is not None and _is_ibm_available():
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ]
+            fut = pool.submit(
+                gpt_oss_client.chat,
+                messages=messages,
+                params={"max_tokens": max_tokens, "temperature": temperature}
+            )
+            response = fut.result(timeout=timeout_sec)
+            choice = (response.get("choices") or [{}])[0]
+            content = ((choice.get("message") or {}).get("content") or "").strip()
+            if content:
+                res = _parse_blueprint_json(content)
+                print(f"[BLUEPRINT] {section_name}: SUCCESS (via IBM GPT-OSS-120B, {time.time()-t0:.1f}s)")
+                return res
+        except Exception as e:
+            clean_e = str(e).encode('ascii', errors='replace').decode('ascii')
+            if "429" in clean_e or "too many requests" in clean_e.lower() or "rate_limit" in clean_e.lower():
+                _set_ibm_cooldown(120)
+            print(f"[CRAG Section] {section_name} via IBM GPT-OSS-120B failed or timed out ({clean_e}), attempting Groq fallback...")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    elif gpt_oss_client is not None and not _is_ibm_available():
+        print(f"[CRAG Section] {section_name}: IBM cooldown active (429), bypassing immediately to Groq fallback.")
+
+    # 2. Fallback: Groq with 429 backoff retry
+    if groq_client is not None:
+        groq_model = get_settings().GROQ_MODEL
+        target_tokens = min(max_tokens, 1500)
+        print(f"\n[BLUEPRINT FALLBACK CALL: {section_name.upper()}]")
+        print(f"MODEL: Groq Llama")
+        print(f"MODEL ID: {groq_model}")
+        print(f"PROVIDER: Groq")
+        print(f"INPUT TOKENS IF AVAILABLE: ~{est_tokens}")
+        print(f"MAX OUTPUT TOKENS: {target_tokens}")
+        print(f"TEMPERATURE: {temperature}")
+        print(f"TIMEOUT: 15s")
+        t1 = time.time()
+        for attempt in range(3):
+            try:
+                r = groq_client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=target_tokens,
+                    response_format={"type": "json_object"},
+                    timeout=15.0,
+                )
+                groq_content = (r.choices[0].message.content or "").strip()
+                if groq_content:
+                    res = _parse_blueprint_json(groq_content)
+                    print(f"[BLUEPRINT] {section_name}: SUCCESS (via Groq {groq_model}, {time.time()-t1:.1f}s)")
+                    return res
+            except Exception as e2:
+                clean_e2 = str(e2).encode('ascii', errors='replace').decode('ascii')
+                if "429" in clean_e2 or "rate_limit" in clean_e2.lower():
+                    delay = 3.5
+                    m_delay = re.search(r"try again in ([\d\.]+)s", clean_e2)
+                    if m_delay:
+                        try:
+                            delay = float(m_delay.group(1)) + 0.5
+                        except Exception:
+                            pass
+                    print(f"[CRAG Section] {section_name} hit Groq rate limit (429). Retrying in {delay:.1f}s (attempt {attempt+1}/3)...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"[CRAG Section] {section_name} via Groq also failed: {clean_e2}")
+                    break
+
+    print(f"[BLUEPRINT] {section_name}: FAILED (Both IBM and Groq failed)")
+    return {}
+
+
+def _gen_bmc(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are an expert startup strategist. Generate a complete Business Model Canvas for the startup idea. "
+        "Return ONLY a JSON object with 9 lists matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Generate a concise, realistic Business Model Canvas in India.
+Return JSON with this exact schema:
+{{
+  "key_partners": ["partner1", "partner2", "partner3", "partner4"],
+  "key_resources": ["resource1", "resource2", "resource3", "resource4"],
+  "key_activities": ["activity1", "activity2", "activity3", "activity4"],
+  "value_propositions": ["prop1", "prop2", "prop3"],
+  "customer_relationships": ["rel1", "rel2", "rel3"],
+  "customer_segments": ["segment1", "segment2", "segment3"],
+  "channels": ["channel1", "channel2", "channel3"],
+  "cost_structure": ["cost1", "cost2", "cost3", "cost4"],
+  "revenue_streams": ["stream1", "stream2", "stream3"]
+}}"""
+    raw = _call_section_llm("bmc", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1500)
+    return raw.get("bmc", raw)
+
+
+def _gen_budget(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are a startup financial advisor. Estimate a practical 12-month budget in Indian Rupees (INR) across 3 phases: "
+        "MVP (Month 1-3), Launch (Month 4-6), and Growth (Month 7-12). "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Provide estimated line items with realistic integer INR amounts (e.g. 150000).
+Return JSON with this exact schema:
+{{
+  "phases": [
+    {{
+      "name": "MVP",
+      "duration": "Month 1-3",
+      "items": [
+        {{"item": "Core Platform Engineering", "amount": 250000}},
+        {{"item": "Cloud Hosting & AI APIs", "amount": 100000}},
+        {{"item": "Legal & Incorporation", "amount": 50000}}
+      ]
+    }},
+    {{
+      "name": "Launch",
+      "duration": "Month 4-6",
+      "items": [
+        {{"item": "Customer Acquisition & Digital Marketing", "amount": 200000}},
+        {{"item": "Sales Outreach & Support", "amount": 150000}},
+        {{"item": "Operational Overhead", "amount": 50000}}
+      ]
+    }},
+    {{
+      "name": "Growth",
+      "duration": "Month 7-12",
+      "items": [
+        {{"item": "Team Scaling & Senior Engineers", "amount": 400000}},
+        {{"item": "Partnership Marketing & SEO", "amount": 250000}},
+        {{"item": "Security & Compliance Audits", "amount": 150000}}
+      ]
+    }}
+  ],
+  "funding_suggestion": "Startup India Seed Fund Scheme (SISFS) + Angel Syndicate"
+}}"""
+    raw = _call_section_llm("budget", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1400)
+    budget = raw.get("budget", raw)
+    phases = budget.get("phases", [])
+    if not isinstance(phases, list) or len(phases) == 0:
+        phases = [
+            {"name": "MVP", "duration": "Month 1-3", "items": [{"item": "Core Engineering & Infrastructure", "amount": 300000}]},
+            {"name": "Launch", "duration": "Month 4-6", "items": [{"item": "Marketing & Pilot Acquisition", "amount": 250000}]},
+            {"name": "Growth", "duration": "Month 7-12", "items": [{"item": "Scaling & Security Audits", "amount": 450000}]},
+        ]
+    total_12 = 0
+    for p in phases:
+        items = p.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        phase_total = sum(int(it.get("amount", 0)) for it in items if isinstance(it, dict) and isinstance(it.get("amount"), (int, float)))
+        p["total"] = phase_total
+        total_12 += phase_total
+    budget["total_12_months"] = total_12 if total_12 > 0 else 1000000
+    for p in phases:
+        p["percentage"] = round((p.get("total", 0) / budget["total_12_months"]) * 100, 1)
+    budget["phases"] = phases
+    if not budget.get("funding_suggestion"):
+        budget["funding_suggestion"] = "Startup India Seed Fund Scheme + Angel Investment"
+    return budget
+
+
+def _gen_gtm(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are a Go-to-Market growth strategist. Generate a structured GTM plan for an Indian startup. "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Generate a concise, practical GTM strategy with 5 sequential launch steps, growth channels, milestones, and KPIs.
+Return JSON with this exact schema:
+{{
+  "target_market": "Clear definition of initial target customer and geography",
+  "market_size": "Estimated TAM, SAM, SOM (e.g. TAM: $2.5B, SAM: $450M, SOM: $15M in India)",
+  "launch_strategy": [
+    "1. Preparation: Prototype validation with 20 pilot users",
+    "2. MVP: Release core feature set to targeted beta cohort",
+    "3. Pilot: Paid pilot deployment with 50 MSMEs",
+    "4. Public Launch: Self-serve onboarding and digital campaigns",
+    "5. Expansion: Regional partner networks and enterprise tiers"
+  ],
+  "growth_channels": [
+    {{
+      "channel": "B2B Outbound & Direct Sales",
+      "strategy": "Direct outreach to SME business owners via LinkedIn & email",
+      "rationale": "High conversion for SaaS software",
+      "priority": "HIGH",
+      "cost": "MIXED"
+    }},
+    {{
+      "channel": "Industry Associations & CA Partnerships",
+      "strategy": "Partner with chartered accountant networks & MSME forums",
+      "rationale": "Trusted advisors recommend the platform",
+      "priority": "HIGH",
+      "cost": "FREE"
+    }},
+    {{
+      "channel": "Content Marketing & SEO",
+      "strategy": "Practical guides on Indian business cash flow & GST",
+      "rationale": "Organic intent-driven acquisition",
+      "priority": "MEDIUM",
+      "cost": "FREE"
+    }}
+  ],
+  "milestones": [
+    {{"month": 1, "goal": "Beta architecture and compliance framework established"}},
+    {{"month": 3, "goal": "Onboard first 25 active pilot customers"}},
+    {{"month": 6, "goal": "Achieve ₹1.5L MRR with >80% 30-day retention"}},
+    {{"month": 9, "goal": "Expand to 150 paying business accounts"}},
+    {{"month": 12, "goal": "Reach ₹10L MRR and initiate Seed fundraising round"}}
+  ],
+  "key_metrics": ["Monthly Recurring Revenue (MRR)", "Customer Acquisition Cost (CAC)", "Customer Lifetime Value (LTV)", "Monthly Net Churn", "Weekly Active Users (WAU)"]
+}}"""
+    raw = _call_section_llm("gtm", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1600)
+    return raw.get("gtm", raw)
+
+
+def _gen_investors(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are a venture capital and government scheme specialist for Indian startups. "
+        "Ground recommendations in official schemes (Startup India, MSME, DPIIT, SIDBI) and Indian investor networks. "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Generate a realistic funding roadmap, eligible government schemes (with benefits, eligibility, limitations), investor categories, and pitch tips.
+Return JSON with this exact schema:
+{{
+  "funding_roadmap": [
+    {{"stage": "Pre-Seed / Grants", "timeline": "Month 1-4", "source": "Startup India Seed Fund (SISFS) / Incubator Grants", "amount": "₹20L - ₹50L"}},
+    {{"stage": "Seed Round", "timeline": "Month 5-9", "source": "Angel Networks & Micro VCs", "amount": "₹75L - ₹1.5Cr"}},
+    {{"stage": "Pre-Series A", "timeline": "Month 10-14", "source": "Early Stage VCs", "amount": "₹3Cr - ₹5Cr"}}
+  ],
+  "government_schemes": [
+    {{
+      "name": "Startup India Seed Fund Scheme (SISFS)",
+      "benefit": "Grants up to ₹20L for prototype; debt/convertible up to ₹50L for market entry",
+      "eligibility": "DPIIT recognised startup incorporated < 2 years with innovative business model",
+      "relevance": "Non-dilutive early capital to fund MVP and initial validation",
+      "limitations": "Subject to incubator selection committee approval and milestones",
+      "amount": "Up to ₹50 Lakhs"
+    }},
+    {{
+      "name": "Credit Guarantee Scheme for Startups (CGSS)",
+      "benefit": "Collateral-free credit guarantee for loans by member institutions",
+      "eligibility": "DPIIT recognised startups with stable revenue",
+      "relevance": "Access to working capital debt without collateral",
+      "limitations": "Requires bank approval and financial track record",
+      "amount": "Up to ₹10 Crores"
+    }}
+  ],
+  "investor_types": [
+    {{
+      "type": "Early Stage Angel Syndicates",
+      "stage": "Pre-Seed / Seed",
+      "focus": "Fintech, B2B SaaS, MSME Tech",
+      "examples": ["Indian Angel Network (IAN)", "Mumbai Angels", "LetsVenture"]
+    }},
+    {{
+      "type": "Seed & Pre-Series A Venture Funds",
+      "stage": "Seed",
+      "focus": "India-first SaaS, Enterprise Software",
+      "examples": ["Blume Ventures", "Kae Capital", "India Quotient"]
+    }}
+  ],
+  "incubators": [
+    {{"name": "NSRCEL (IIM Bangalore)", "focus": "Early stage tech startups", "location": "Bangalore"}},
+    {{"name": "CIIE.CO (IIM Ahmedabad)", "focus": "Tech inclusion and FinTech", "location": "Ahmedabad"}},
+    {{"name": "T-Hub", "focus": "Enterprise tech & scaling", "location": "Hyderabad"}}
+  ],
+  "pitch_tips": [
+    "Highlight unit economics and clear path to LTV/CAC > 3x",
+    "Emphasize MSME pain point validation with pilot customer quotes",
+    "Showcase regulatory alignment with DPIIT and data privacy standards",
+    "Demonstrate SaaS recurring revenue predictability with low churn assumptions"
+  ]
+}}"""
+    raw = _call_section_llm("investors", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1600)
+    return raw.get("investors", raw)
+
+
+def _gen_competitors(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are a competitive intelligence analyst. Identify 3-5 real competitors or existing alternatives in the market, "
+        "their strengths, weaknesses, and how this startup differentiates. "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Identify actual direct and indirect competitors/alternatives, key differentiators, market gaps, and strategy.
+Return JSON with this exact schema:
+{{
+  "competitors": [
+    {{
+      "name": "Khatabook / OkCredit (Digital Ledgers)",
+      "type": "Indirect",
+      "core_offering": "Digital bookkeeping and credit tracking for small merchants",
+      "strength": "Massive distribution and widespread brand recognition among MSMEs",
+      "weakness": "Basic recording tool without predictive AI forecasting or cash-flow planning",
+      "differentiator": "Automated cash-flow predictive intelligence vs static ledger recording",
+      "market_share": "30%",
+      "funding": "Series C ($100M+)"
+    }},
+    {{
+      "name": "Traditional CA & Spreadsheet Accounting",
+      "type": "Indirect",
+      "core_offering": "Manual Excel reconciliation and monthly audit reviews",
+      "strength": "Established habit and personalized trust with business owners",
+      "weakness": "Retrospective (lagging) analysis; no real-time warning before liquidity crunch",
+      "differentiator": "Real-time forward-looking predictive alerts instead of retrospective tax filing",
+      "market_share": "50%",
+      "funding": "Bootstrapped"
+    }},
+    {{
+      "name": "Clear / Zoho Books",
+      "type": "Direct / Alternative",
+      "core_offering": "Comprehensive accounting, GST compliance, and invoice management",
+      "strength": "Full enterprise accounting suite with deep ERP integrations",
+      "weakness": "Complex interface and steep learning curve for micro-entrepreneurs",
+      "differentiator": "Lightweight, purpose-built cash-shortage prediction with zero accounting overhead",
+      "market_share": "15%",
+      "funding": "Established Corporates"
+    }}
+  ],
+  "our_differentiators": [
+    "Predictive AI forecasting cash shortages 14-30 days before they occur",
+    "Automated smart WhatsApp payment follow-ups tailored to invoice payment history",
+    "Seamless one-click GST and bank statement ingestion without manual entry",
+    "Actionable micro-recommendations instead of complex accounting ledgers"
+  ],
+  "market_gaps": [
+    "Lack of predictive foresight in entry-level accounting tools",
+    "MSMEs struggle with late invoice payments causing working capital insolvency",
+    "Overly complex enterprise software inaccessible to non-technical business owners"
+  ],
+  "competitive_strategy": "Position as the automated proactive cash-flow guardian that works alongside existing tools like Tally or Zoho, focusing on liquidity protection and zero data-entry friction."
+}}"""
+    raw = _call_section_llm("competitors", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1600)
+    if isinstance(raw, list):
+        return {"competitors": raw, "our_differentiators": [], "market_gaps": [], "competitive_strategy": ""}
+    if isinstance(raw, dict):
+        if "competitors" not in raw and any(k in raw for k in ("name", "core_offering")):
+            return {"competitors": [raw], "our_differentiators": [], "market_gaps": [], "competitive_strategy": ""}
+        return raw
+    return {}
+
+
+def _gen_risks(brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are an enterprise risk management specialist. Identify 5-6 realistic risks across Market, Technical, Financial, "
+        "Regulatory, and Operational categories for the startup idea with practical mitigations. "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Identify realistic risks with severity, probability, impact, and actionable mitigation strategies.
+Return JSON with this exact schema:
+{{
+  "risks": [
+    {{
+      "category": "Customer Adoption",
+      "severity": "HIGH",
+      "probability": "MEDIUM",
+      "impact": "MSME owners may hesitate to connect bank accounts or share invoice data due to privacy concerns",
+      "risk": "Reluctance to adopt automated financial software among traditional merchants",
+      "mitigation": "Provide read-only bank statement upload, local encryption, and trust certifications (ISO 27001 / SOC 2)"
+    }},
+    {{
+      "category": "Market",
+      "severity": "MEDIUM",
+      "probability": "HIGH",
+      "impact": "Slower conversion from free trial to paid subscription tiers",
+      "risk": "Price sensitivity and low willingness to pay for standalone SaaS tools",
+      "mitigation": "Tie pricing directly to measurable working capital savings and offer low-cost monthly plans"
+    }},
+    {{
+      "category": "Regulatory",
+      "severity": "HIGH",
+      "probability": "LOW",
+      "impact": "Stricter data localization or financial data consent directives from RBI",
+      "risk": "Compliance challenges under India Digital Personal Data Protection (DPDP) Act and RBI Account Aggregator guidelines",
+      "mitigation": "Partner with licensed RBI Account Aggregators and build DPDP-compliant consent management from Day 1"
+    }},
+    {{
+      "category": "Technical",
+      "severity": "MEDIUM",
+      "probability": "MEDIUM",
+      "impact": "Inaccurate cash-flow predictions during seasonal spikes eroding user trust",
+      "risk": "Model prediction errors due to non-standard or fragmented invoice formats",
+      "mitigation": "Implement human-in-the-loop validation for edge cases and calibrate prediction intervals with confidence bands"
+    }},
+    {{
+      "category": "Financial",
+      "severity": "HIGH",
+      "probability": "MEDIUM",
+      "impact": "Cash burn exceeds runway before achieving product-market fit",
+      "risk": "Extended sales cycles causing working capital depletion",
+      "mitigation": "Maintain a disciplined 18-month runway and leverage non-dilutive government grants (SISFS)"
+    }}
+  ]
+}}"""
+    raw = _call_section_llm("risks", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1500)
+    res = raw.get("risks", raw)
+    if isinstance(res, list):
+        return {"risks": res}
+    return res
+
+
+def _gen_crag_trace(brief: str, evidence: str, sources: str, groq_client, gpt_oss_client) -> dict:
+    system_prompt = (
+        "You are a knowledge grounding auditor. Document how verified evidence and policy context informed the startup blueprint. "
+        "Return ONLY a JSON object matching the schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+GROUNDED EVIDENCE:
+{evidence}
+
+SOURCES CITED:
+{sources}
+
+Document the verified context, inferences, recommendations, and evidence mappings.
+Return JSON with this exact schema:
+{{
+  "verified_context": [
+    "Startup India Seed Fund Scheme provides early capital for DPIIT-recognised startups",
+    "India MSME sector faces average payment cycles of 60-90 days, driving working capital constraints",
+    "RBI Account Aggregator framework provides secure consent-based financial data sharing"
+  ],
+  "inferences": [
+    "AI predictive forecasting addresses the root cause of MSME insolvency by surfacing liquidity gaps ahead of time",
+    "A subscription B2B SaaS model is sustainable if unit pricing aligns with MSME software willingness-to-pay"
+  ],
+  "recommendations": [
+    "Apply for DPIIT recognition immediately to unlock SISFS grant eligibility",
+    "Integrate with licensed Account Aggregators rather than scraping bank credentials",
+    "Focus initial marketing on high-velocity invoice industries like distribution and light manufacturing"
+  ],
+  "source_usage": [
+    {{"claim": "Startup India Seed Fund eligibility & capital guidelines", "source": "DPIIT Startup India Guidelines"}},
+    {{"claim": "MSME payment delays and working capital dynamics", "source": "MSME Ministry Annual Report"}},
+    {{"claim": "Consent-based data sharing guidelines", "source": "Reserve Bank of India Regulations"}}
+  ]
+}}"""
+    raw = _call_section_llm("crag_trace", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1400)
+    return raw.get("crag_trace", raw)
+
+
+def _is_section_valid(section_name: str, data: Any) -> bool:
+    if not data or not isinstance(data, (dict, list)):
+        return False
+    if section_name == "bmc":
+        if not isinstance(data, dict):
+            return False
+        non_empty = [k for k in ("value_propositions", "customer_segments", "revenue_streams", "key_activities", "cost_structure") if data.get(k) and len(data[k]) > 0]
+        return len(non_empty) >= 3
+    elif section_name == "budget":
+        if not isinstance(data, dict):
+            return False
+        return len(data.get("phases", [])) >= 2 and data.get("total_12_months", 0) > 0
+    elif section_name == "gtm":
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("target_market")) or len(data.get("launch_strategy", [])) >= 2 or len(data.get("growth_channels", [])) >= 1
+    elif section_name == "investors":
+        if not isinstance(data, dict):
+            return False
+        return len(data.get("government_schemes", [])) >= 1 or len(data.get("funding_roadmap", [])) >= 1
+    elif section_name == "competitors":
+        if isinstance(data, list):
+            return len(data) >= 1
+        if isinstance(data, dict):
+            comp_list = data.get("competitors", [])
+            diff_list = data.get("our_differentiators", [])
+            return (isinstance(comp_list, list) and len(comp_list) >= 1) or (isinstance(diff_list, list) and len(diff_list) >= 1)
+        return False
+    elif section_name == "risks":
+        risks_list = data if isinstance(data, list) else data.get("risks", [])
+        return len(risks_list) >= 2
+    elif section_name == "crag_trace":
+        if not isinstance(data, dict):
+            return False
+        return len(data.get("verified_context", [])) >= 1 or len(data.get("recommendations", [])) >= 1
+    return True
+
+
+def _repair_section(section_name: str, brief: str, evidence: str, sources: str, groq_client, gpt_oss_client) -> dict:
+    print(f"[BLUEPRINT REPAIR] Attempting targeted single-section repair for: {section_name.upper()}...")
+    if section_name == "bmc":
+        return _gen_bmc(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "budget":
+        return _gen_budget(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "gtm":
+        return _gen_gtm(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "investors":
+        return _gen_investors(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "competitors":
+        return _gen_competitors(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "risks":
+        return _gen_risks(brief, evidence, groq_client, gpt_oss_client)
+    elif section_name == "crag_trace":
+        return _gen_crag_trace(brief, evidence, sources, groq_client, gpt_oss_client)
+    return {}
+
+
+def validate_required_blueprint_fields(data: dict) -> list[str]:
+    """
+    Validate that specific mandatory sub-fields exist and are non-empty.
+    Required by specification:
+      - funding.investor_landscape
+      - funding.investor_landscape.relevant_incubators
+      - funding.investor_landscape.pitch_tips
+      - competitors.our_differentiators
+      - competitors.market_gaps
+      - competitors.competitive_strategy
+    """
+    missing = []
+
+    # Check Funding / Investors
+    inv = data.get("investors") or data.get("funding") or {}
+    if not isinstance(inv, dict):
+        inv = {}
+
+    inv_landscape = inv.get("investor_landscape") or inv.get("investor_types") or []
+    if not isinstance(inv_landscape, list) or len(inv_landscape) == 0:
+        missing.append("funding.investor_landscape")
+
+    incubators = inv.get("relevant_incubators") or inv.get("incubators") or []
+    if not isinstance(incubators, list) or len(incubators) == 0:
+        missing.append("funding.investor_landscape.relevant_incubators")
+
+    pitch_tips = inv.get("pitch_tips") or []
+    if not isinstance(pitch_tips, list) or len(pitch_tips) == 0:
+        missing.append("funding.investor_landscape.pitch_tips")
+
+    # Check Competitors
+    comp = data.get("competitors") or {}
+    if not isinstance(comp, dict):
+        comp = {}
+
+    diffs = comp.get("our_differentiators") or []
+    if not isinstance(diffs, list) or len(diffs) == 0:
+        missing.append("competitors.our_differentiators")
+
+    gaps = comp.get("market_gaps") or []
+    if not isinstance(gaps, list) or len(gaps) == 0:
+        missing.append("competitors.market_gaps")
+
+    strat = comp.get("competitive_strategy") or ""
+    if not isinstance(strat, str) or len(strat.strip()) < 15:
+        missing.append("competitors.competitive_strategy")
+
+    return missing
+
+
+def repair_missing_blueprint_fields(missing: list[str], brief: str, evidence: str, groq_client, gpt_oss_client) -> dict:
+    """
+    Execute ONE small targeted repair LLM call containing ONLY the missing fields.
+    Returns a strict JSON object with only the repaired fields.
+    """
+    schemas = []
+    if "funding.investor_landscape" in missing:
+        schemas.append('"investor_landscape": [\n    {"type": "Angel Networks & Early Syndicates", "stage": "Pre-Seed / Seed", "focus": "Fintech / B2B SaaS", "examples": ["Indian Angel Network (IAN)", "LetsVenture", "Mumbai Angels"]},\n    {"type": "Micro VCs & Seed Funds", "stage": "Seed", "focus": "India MSME Software", "examples": ["Blume Ventures", "India Quotient", "Kae Capital"]}\n  ]')
+    if "funding.investor_landscape.relevant_incubators" in missing:
+        schemas.append('"relevant_incubators": [\n    {"name": "CIIE.CO (IIM Ahmedabad)", "focus": "Fintech & Financial Inclusion", "location": "Ahmedabad"},\n    {"name": "NSRCEL (IIM Bangalore)", "focus": "B2B Tech Startups", "location": "Bangalore"},\n    {"name": "T-Hub", "focus": "SaaS Scaling & Corporate Pilots", "location": "Hyderabad"}\n  ]')
+    if "funding.investor_landscape.pitch_tips" in missing:
+        schemas.append('"pitch_tips": [\n    "Demonstrate customer validation with real pilot MSME retention figures",\n    "Show clear SaaS unit economics with target LTV/CAC > 3x",\n    "Highlight compliance with RBI and Account Aggregator data standards"\n  ]')
+    if "competitors.our_differentiators" in missing:
+        schemas.append('"our_differentiators": [\n    "Predictive AI forecasting cash shortages 14-30 days before they occur",\n    "Automated smart WhatsApp payment reminders tailored to invoice history",\n    "Seamless one-click GST and bank statement ingestion without manual entry",\n    "Lightweight, zero-training interface designed specifically for non-accountant owners"\n  ]')
+    if "competitors.market_gaps" in missing:
+        schemas.append('"market_gaps": [\n    "Lack of forward-looking cash forecasting in traditional accounting tools",\n    "Delayed payments from enterprise buyers causing MSME liquidity crunches",\n    "Enterprise ERP suites too expensive and complex for small businesses"\n  ]')
+    if "competitors.competitive_strategy" in missing:
+        schemas.append('"competitive_strategy": "Position as a lightweight predictive cash guardian that works seamlessly alongside existing accounting software like Tally or Zoho, prioritizing zero-friction automated alerts and liquidity protection."')
+
+    schema_body = ",\n  ".join(schemas)
+    system_prompt = (
+        "You are an expert startup strategist. Generate high quality content ONLY for the missing required fields in strict JSON format. "
+        "Return ONLY a valid JSON object matching the requested schema."
+    )
+    user_prompt = f"""STARTUP IDEA:
+{brief}
+
+EVIDENCE & CONTEXT:
+{evidence}
+
+Generate specific, realistic content ONLY for these missing fields:
+{{
+  {schema_body}
+}}"""
+
+    repaired = _call_section_llm("repair", system_prompt, user_prompt, groq_client, gpt_oss_client, max_tokens=1200)
+    return repaired
+
+
 def node_generate_blueprint(
     structured_brief, granite_summary, web_context,
     sector, model_type, stage, target_city, groq_client, gpt_oss_client,
     policy_sources=None, policy_crag=None, investor_context=None, investor_sources=None
 ):
-    import re
-    import json
+    import concurrent.futures
 
-    startup_idea_text = structured_brief or ""
-    granite_sum_text = granite_summary or ""
-    pol_sources_text = policy_sources or "Official Indian Policy Documents & Regulations"
-    pol_crag_text = policy_crag or granite_summary or "CRAG Policy Context"
-    inv_context_text = investor_context or policy_crag or "Indian Startup Investor & Government Scheme Ecosystem"
-    inv_sources_text = investor_sources or policy_sources or "DPIIT, Startup India, SIDBI, Incubator Databases"
-    web_ctx_text = web_context[:2000] if web_context else "No additional live web context available."
-
-    system_prompt = (
-        "You are an expert startup strategist, business analyst, market researcher, and venture advisor.\n\n"
-        "Your task is to transform the provided startup idea and retrieved research into a complete, realistic, evidence-grounded startup blueprint."
+    t0 = time.time()
+    evidence = (
+        f"Granite Policy Summary:\n{granite_summary[:1200] if granite_summary else 'None'}\n\n"
+        f"Policy / Evidence Chunks:\n{policy_crag[:1000] if policy_crag else 'General Indian startup regulatory environment.'}\n\n"
+        f"Web Market Context:\n{web_context[:600] if web_context else 'None'}"
     )
-
-    user_prompt = f"""IMPORTANT RULES:
-
-1. Do not simply summarize the retrieved context.
-2. Do not invent statistics, market sizes, government schemes, funding amounts, competitors, investors, regulations, partnerships, or financial figures.
-3. Clearly distinguish between:
-   - VERIFIED FACTS supported by retrieved sources
-   - INFERENCES derived from those facts
-   - STRATEGIC RECOMMENDATIONS generated by the model
-4. If the retrieved information does not support a claim, do not present it as a verified fact.
-5. Use current Indian laws, schemes, policies, and regulations where applicable.
-6. Do not treat proposed, outdated, repealed, or superseded legislation as current law.
-7. Government schemes must NEVER be presented as guaranteed eligibility. Use wording such as "may qualify subject to eligibility requirements".
-8. Market-size numbers must either be supported by retrieved sources or explicitly labelled as estimates/assumptions.
-9. Competitors must be genuine and relevant. Never fabricate competitors.
-10. Avoid generic startup advice. Every recommendation must be specific to the startup idea.
-11. Avoid unnecessary repetition between sections.
-12. Make the output investor-ready and practical.
-13. Every section must be populated. Never return an empty section.
-14. Keep budget calculations internally consistent.
-15. Do not claim that a company, investor, government body, university, or partner has agreed to work with the startup unless the sources explicitly support that claim.
-
-INPUT DATA:
-
-STARTUP IDEA:
-{startup_idea_text}
-
-IBM GRANITE POLICY BRIEF:
-{granite_sum_text}
-
-POLICY SOURCES:
-{pol_sources_text}
-
-CRAG POLICY CONTEXT:
-{pol_crag_text}
-
-INVESTOR / MARKET CONTEXT:
-{inv_context_text}
-
-INVESTOR SOURCES:
-{inv_sources_text}
-
-ADDITIONAL WEB RESEARCH:
-{web_ctx_text}
-
-
-GENERATE THE FOLLOWING BLUEPRINT:
-
-==================================================
-1. BUSINESS MODEL
-==================================================
-
-KEY PARTNERS:
-Provide 4–6 realistic partner categories or potential partners relevant to this startup.
-
-KEY RESOURCES:
-List the technology, people, data, infrastructure, intellectual property, and other resources required.
-
-KEY ACTIVITIES:
-Provide 5–7 concrete activities required to build, operate, and scale the startup.
-
-VALUE PROPOSITIONS:
-Explain:
-- The customer problem
-- The solution
-- The unique value
-- Why customers would choose this over existing alternatives
-
-CUSTOMER RELATIONSHIPS:
-Explain customer acquisition, onboarding, support, retention, loyalty, and re-engagement.
-
-CUSTOMER SEGMENTS:
-Define primary and secondary customer segments with relevant demographic, geographic, behavioral, or business characteristics.
-
-CHANNELS:
-Describe the most relevant acquisition and distribution channels.
-
-COST STRUCTURE:
-Separate major fixed and variable costs.
-
-REVENUE STREAMS:
-Explain exactly how the startup generates revenue.
-Include realistic pricing, commissions, subscriptions, transaction fees, or other models where relevant.
-
-
-==================================================
-2. BUDGET
-==================================================
-
-Create a realistic 12-month budget divided into:
-
-MVP: MONTH 1–3
-LAUNCH: MONTH 4–6
-GROWTH: MONTH 7–12
-
-For each phase provide:
-- Expense category
-- Description
-- Estimated amount in INR
-- Phase total
-
-Also provide:
-- Total 12-month budget
-- Percentage allocation by phase
-
-CRITICAL:
-The phase totals MUST mathematically equal the 12-month total.
-
-Do not create an unnecessarily large budget for an MVP.
-
-
-==================================================
-3. GO-TO-MARKET STRATEGY
-==================================================
-
-TARGET MARKET:
-Define the initial target customer and geography and explain why this market should be targeted first.
-
-MARKET SIZE:
-Provide TAM, SAM and SOM only when reliable evidence exists.
-If numbers are estimated, explicitly label them as estimates and explain the assumption.
-
-LAUNCH STRATEGY:
-Create exactly 5 sequential steps:
-1. Preparation
-2. MVP
-3. Pilot
-4. Public Launch
-5. Expansion
-
-Each step must contain concrete actions and measurable milestones.
-
-GROWTH CHANNELS:
-Provide 5–7 channels.
-
-For every channel include:
-- Channel
-- Strategy
-- Reason it fits
-- Priority: HIGH / MEDIUM / LOW
-- Cost: FREE / PAID / MIXED
-
-KEY KPIs:
-Provide 5–7 metrics relevant to this startup.
-
-TIMELINE:
-Provide measurable milestones for:
-M1
-M3
-M6
-M9
-M12
-
-
-==================================================
-4. FUNDING ROADMAP
-==================================================
-
-GOVERNMENT SCHEMES:
-
-For each relevant scheme provide:
-- Scheme name
-- Benefit
-- Eligibility
-- Relevance to this startup
-- Important limitations
-
-NEVER claim guaranteed eligibility.
-
-INVESTOR LANDSCAPE:
-Identify suitable investor categories such as:
-- Angels
-- Seed funds
-- Venture capital
-- Corporate venture capital
-- Strategic investors
-
-Only name specific investors when supported by the retrieved context.
-
-RELEVANT INCUBATORS:
-Recommend relevant incubators or accelerators based on sector, geography, technology, and startup stage.
-
-PITCH TIPS:
-Provide 5 startup-specific pitch recommendations.
-
-
-==================================================
-5. COMPETITIVE ANALYSIS
-==================================================
-
-THIS SECTION IS MANDATORY AND MUST NEVER BE EMPTY.
-
-Identify 4–6 relevant competitors or alternatives.
-
-For each provide:
-- Name
-- Direct / Indirect competitor
-- Core offering
-- Strengths
-- Weaknesses
-- How our startup differentiates
-
-If there is no verified direct competitor, explicitly label an alternative as an indirect competitor.
-
-OUR DIFFERENTIATORS:
-Provide 4–6 specific differentiators.
-
-MARKET GAPS:
-Provide 4–6 genuine gaps that this startup can exploit.
-
-COMPETITIVE STRATEGY:
-Explain:
-- Market entry strategy
-- Differentiation strategy
-- First-customer acquisition
-- Retention strategy
-- Defensibility
-- Response to larger competitors
-
-
-==================================================
-6. RISK ANALYSIS
-==================================================
-
-Identify at least 6 realistic risks.
-
-Possible categories:
-- Market
-- Financial
-- Technical
-- Competition
-- Regulatory
-- Data Privacy
-- Operational
-- Customer Adoption
-
-For every risk provide:
-- Risk
-- Severity: LOW / MEDIUM / HIGH
-- Probability: LOW / MEDIUM / HIGH
-- Impact
-- Mitigation
-
-
-==================================================
-7. CRAG TRACE
-==================================================
-
-Explain how retrieved information influenced the blueprint.
-
-VERIFIED CONTEXT:
-Facts directly supported by retrieved sources.
-
-INFERENCES:
-Conclusions derived from the evidence.
-
-RECOMMENDATIONS:
-Strategic recommendations generated from the evidence.
-
-SOURCE USAGE:
-Map important claims to the source that supports them.
-
-Never fabricate citations or sources.
-
-
-==================================================
-FINAL VALIDATION
-==================================================
-
-Before returning the answer verify:
-
-- Every section is populated.
-- Competitive Strategy is populated.
-- Competitors are relevant.
-- Budget totals are mathematically correct.
-- Government scheme eligibility is not guaranteed.
-- Current regulations are used.
-- Outdated/proposed legislation is not presented as current.
-- Market-size figures are sourced or explicitly marked as estimates.
-- No fabricated investors, competitors, schemes, statistics, partnerships, or claims.
-- Recommendations are specific to the startup.
-- No major section repeats another section.
-- Output follows the existing JSON structure expected by the frontend.
-
-You MUST respond with ONLY a single valid JSON object matching this exact schema:
-
-{{
-  "bmc": {{
-    "key_partners": ["string"],
-    "key_resources": ["string"],
-    "key_activities": ["string"],
-    "value_propositions": ["string"],
-    "customer_relationships": ["string"],
-    "customer_segments": ["string"],
-    "channels": ["string"],
-    "cost_structure": ["string"],
-    "revenue_streams": ["string"]
-  }},
-  "budget": {{
-    "phases": [
-      {{
-        "name": "MVP",
-        "duration": "Month 1-3",
-        "items": [ {{ "item": "string", "amount": 100000 }} ],
-        "total": 100000
-      }},
-      {{
-        "name": "Launch",
-        "duration": "Month 4-6",
-        "items": [ {{ "item": "string", "amount": 150000 }} ],
-        "total": 150000
-      }},
-      {{
-        "name": "Growth",
-        "duration": "Month 7-12",
-        "items": [ {{ "item": "string", "amount": 250000 }} ],
-        "total": 250000
-      }}
-    ],
-    "total_12_months": 500000,
-    "funding_suggestion": "string"
-  }},
-  "gtm": {{
-    "target_market": "string",
-    "market_size": "string",
-    "launch_strategy": ["string"],
-    "growth_channels": [
-      {{
-        "channel": "string",
-        "strategy": "string",
-        "rationale": "string",
-        "priority": "HIGH / MEDIUM / LOW",
-        "cost": "FREE / PAID / MIXED"
-      }}
-    ],
-    "milestones": [
-      {{ "month": 1, "goal": "string" }},
-      {{ "month": 3, "goal": "string" }},
-      {{ "month": 6, "goal": "string" }},
-      {{ "month": 9, "goal": "string" }},
-      {{ "month": 12, "goal": "string" }}
-    ],
-    "key_metrics": ["string"]
-  }},
-  "investors": {{
-    "funding_roadmap": [
-      {{ "stage": "string", "timeline": "string", "source": "string", "amount": "string" }}
-    ],
-    "government_schemes": [
-      {{
-        "name": "string",
-        "benefit": "string",
-        "eligibility": "string",
-        "relevance": "string",
-        "limitations": "string",
-        "amount": "string"
-      }}
-    ],
-    "investor_types": [
-      {{
-        "type": "string",
-        "stage": "string",
-        "focus": "string",
-        "examples": ["string"]
-      }}
-    ],
-    "incubators": [
-      {{ "name": "string", "focus": "string", "location": "string" }}
-    ],
-    "pitch_tips": ["string"]
-  }},
-  "competitors": {{
-    "competitors": [
-      {{
-        "name": "string",
-        "type": "Direct / Indirect",
-        "core_offering": "string",
-        "strength": "string",
-        "weakness": "string",
-        "differentiator": "string",
-        "market_share": "string",
-        "funding": "string"
-      }}
-    ],
-    "our_differentiators": ["string"],
-    "market_gaps": ["string"],
-    "competitive_strategy": "string"
-  }},
-  "risks": {{
-    "risks": [
-      {{
-        "category": "Market",
-        "severity": "HIGH",
-        "probability": "MEDIUM",
-        "impact": "string",
-        "risk": "string",
-        "mitigation": "string"
-      }}
-    ]
-  }},
-  "crag_trace": {{
-    "verified_context": ["string"],
-    "inferences": ["string"],
-    "recommendations": ["string"],
-    "source_usage": [
-      {{ "claim": "string", "source": "string" }}
-    ]
-  }}
-}}
-"""
-
-    res = {}
-    # 1. Try GPT-OSS-120B (PRIMARY)
-    try:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ]
-        response = gpt_oss_client.chat(
-            messages=messages,
-            params={"max_tokens": 4500, "temperature": 0.3}
-        )
-        content = response["choices"][0]["message"]["content"].strip()
-        start = content.find('{')
-        end = content.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            content = content[start:end+1]
-        res = json.loads(content)
-    except Exception as e:
-        print(f"[CRAG Blueprint] GPT-OSS-120B failed, using Groq fallback: {e}")
-        try:
-            r = groq_client.chat.completions.create(
-                model=get_settings().GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=3500,
-                response_format={"type": "json_object"},
-            )
-            res = json.loads(r.choices[0].message.content)
-        except Exception as e2:
-            print(f"[CRAG Blueprint] Groq fallback also failed: {e2}")
-            res = {}
-
-    # Defensive defaults for Budget
-    budget = res.get("budget", {})
-    if "phases" not in budget:
-        budget["phases"] = [
-            {"name":"MVP","duration":"Month 1-3","items":[{"item":"Development","amount":200000}],"total":200000},
-            {"name":"Launch","duration":"Month 4-6","items":[{"item":"Marketing","amount":150000}],"total":150000},
-            {"name":"Growth","duration":"Month 7-12","items":[{"item":"Scaling","amount":350000}],"total":350000},
-        ]
-    if "total_12_months" not in budget:
-        budget["total_12_months"] = sum(p.get("total",0) for p in budget["phases"])
-    if "funding_suggestion" not in budget:
-        budget["funding_suggestion"] = "Startup India Seed Fund + Angel Investment"
-
-    raw_risks = res.get("risks", {})
-    if isinstance(raw_risks, list):
-        risks_dict = {"risks": raw_risks}
-    elif isinstance(raw_risks, dict):
-        risks_dict = raw_risks
+    sources_str = policy_sources or "Official Indian Policy Documents & Regulations"
+
+    results = {}
+    print(f"[CRAG Blueprint] Starting parallel modular generation of all sections...")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f_bmc = executor.submit(_gen_bmc, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_budget = executor.submit(_gen_budget, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_gtm = executor.submit(_gen_gtm, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_investors = executor.submit(_gen_investors, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_comp = executor.submit(_gen_competitors, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_risks = executor.submit(_gen_risks, structured_brief, evidence, groq_client, gpt_oss_client)
+        f_trace = executor.submit(_gen_crag_trace, structured_brief, evidence, sources_str, groq_client, gpt_oss_client)
+
+        results["bmc"] = f_bmc.result()
+        results["budget"] = f_budget.result()
+        results["gtm"] = f_gtm.result()
+        results["investors"] = f_investors.result()
+        results["competitors"] = f_comp.result()
+        results["risks"] = f_risks.result()
+        results["crag_trace"] = f_trace.result()
+
+    failed_sections = []
+    for sec_name in ["bmc", "budget", "gtm", "investors", "competitors", "risks", "crag_trace"]:
+        if not _is_section_valid(sec_name, results.get(sec_name)):
+            print(f"[BLUEPRINT] {sec_name}: INVALID / EMPTY -> Triggering single-section repair...")
+            repaired = _repair_section(sec_name, structured_brief, evidence, sources_str, groq_client, gpt_oss_client)
+            if _is_section_valid(sec_name, repaired):
+                print(f"[BLUEPRINT REPAIR] {sec_name}: SUCCESS")
+                results[sec_name] = repaired
+            else:
+                print(f"[BLUEPRINT REPAIR] {sec_name}: FAILED")
+                failed_sections.append(sec_name)
+
+    # ── Field-level validation and targeted single repair call ────────────────
+    missing_fields = validate_required_blueprint_fields(results)
+    print(f"[BLUEPRINT VALIDATION] missing_fields={missing_fields}")
+
+    if missing_fields:
+        print(f"[BLUEPRINT REPAIR] repairing {len(missing_fields)} fields")
+        repaired_dict = repair_missing_blueprint_fields(missing_fields, structured_brief, evidence, groq_client, gpt_oss_client)
+        if repaired_dict and isinstance(repaired_dict, dict):
+            # Merge into investors / funding
+            inv = results.get("investors") if isinstance(results.get("investors"), dict) else {}
+            if "investor_landscape" in repaired_dict or "investor_types" in repaired_dict:
+                val = repaired_dict.get("investor_landscape") or repaired_dict.get("investor_types")
+                inv["investor_landscape"] = val
+                inv["investor_types"] = val
+            if "relevant_incubators" in repaired_dict or "incubators" in repaired_dict:
+                val = repaired_dict.get("relevant_incubators") or repaired_dict.get("incubators")
+                inv["relevant_incubators"] = val
+                inv["incubators"] = val
+            if "pitch_tips" in repaired_dict:
+                inv["pitch_tips"] = repaired_dict["pitch_tips"]
+            results["investors"] = inv
+
+            # Merge into competitors
+            comp = results.get("competitors") if isinstance(results.get("competitors"), dict) else {}
+            if "our_differentiators" in repaired_dict:
+                comp["our_differentiators"] = repaired_dict["our_differentiators"]
+            if "market_gaps" in repaired_dict:
+                comp["market_gaps"] = repaired_dict["market_gaps"]
+            if "competitive_strategy" in repaired_dict:
+                comp["competitive_strategy"] = repaired_dict["competitive_strategy"]
+            results["competitors"] = comp
+            print(f"[BLUEPRINT REPAIR] success")
+
+        # Validate again after targeted repair
+        remaining_missing = validate_required_blueprint_fields(results)
+        if not remaining_missing:
+            print(f"[BLUEPRINT FINAL] all required sections present")
+        else:
+            print(f"[BLUEPRINT VALIDATION] remaining_missing={remaining_missing}")
     else:
-        risks_dict = {"risks": []}
+        print(f"[BLUEPRINT FINAL] all required sections present")
 
-    return {
-        "bmc":         res.get("bmc", {}),
-        "budget":      budget,
-        "gtm":         res.get("gtm", {}),
-        "investors":   res.get("investors", {}),
-        "competitors": res.get("competitors", {}),
-        "risks":       risks_dict,
-        "crag_trace":  res.get("crag_trace", {}),
-    }
+    for sec_name in ["bmc", "budget", "gtm", "investors", "competitors", "risks", "crag_trace"]:
+        status_str = "FAILED" if sec_name in failed_sections else "SUCCESS"
+        print(f"[BLUEPRINT] {sec_name}: {status_str}")
+
+    results["status"] = "partial" if failed_sections else "success"
+    results["failed_sections"] = failed_sections
+    normalized = _normalize_blueprint(results)
+    normalized["status"] = results["status"]
+    normalized["failed_sections"] = results["failed_sections"]
+
+    elapsed = time.time() - t0
+    print(f"[CRAG Blueprint] Modular generation complete in {elapsed:.1f}s. Status: {normalized['status']}, Failed: {failed_sections}")
+    return normalized
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1012,11 +1611,16 @@ def run_crag(
         "explore_results":         [],
     }
 
-    # ── Step 1: Rewrite query (Gemini Flash) ──────────────────────────────────
+    t_start = time.time()
+    t_rewrite = t_retrieve = t_grade = t_refine = t_granite = t_tavily = t_bp = 0.0
+
+    # ── Step 1: Rewrite query (Gemini Flash / Groq) ──────────────────────────
     print("[CRAG] Step 1: Rewriting query...")
+    t0 = time.time()
     rewrite = node_rewrite_query(
         query, sector, stage, model_type, target_city, gemini_client
     )
+    t_rewrite = time.time() - t0
     result["rewritten_query"]  = rewrite["structured_brief"]
     result["structured_brief"] = rewrite["structured_brief"]
     result["keywords"]         = rewrite["keywords"]
@@ -1027,14 +1631,18 @@ def run_crag(
 
     # ── Step 2: Retrieve from all 3 collections ───────────────────────────────
     print("[CRAG] Step 2: Retrieving from ChromaDB (text + table + visual)...")
+    t0 = time.time()
     docs, metas = node_retrieve(search_ctx, collections, n_per_collection=6)
+    t_retrieve = time.time() - t0
     sources = list({m.get("source", "Unknown") for m in metas})
     result["sources"] = sources
     print(f"[CRAG]   Retrieved {len(docs)} chunks from {len(sources)} sources")
 
     # ── Step 3: Evaluate relevance (CrossEncoder) ─────────────────────────────
     print("[CRAG] Step 3: Grading retrieved chunks using original short query...")
+    t0 = time.time()
     scores, raw_logits, confidence, max_logit = node_eval_each_doc(query, docs, reranker)
+    t_grade = time.time() - t0
     result["confidence"] = confidence
     result["scores"]     = scores
     result["raw_logits"] = raw_logits
@@ -1046,23 +1654,29 @@ def run_crag(
     # ══════════════════════════════════════════════════════════════════════════
     if confidence == "CORRECT":
         result["action"] = (
-            "✅ CORRECT — Internal knowledge base is strongly relevant. "
+            "[CORRECT] Internal knowledge base is strongly relevant. "
             "Blueprint grounded in official policy documents."
         )
         result["should_generate_blueprint"] = True
 
-        print("[CRAG] Branch: CORRECT → refining PDF context...")
-        refined = node_refine(search_ctx, docs, raw_logits, reranker)
+        print("[CRAG] Branch: CORRECT -> refining PDF context...")
+        t0 = time.time()
+        refined = node_refine(search_ctx, docs, raw_logits, reranker, top_k=6)
+        t_refine = time.time() - t0
         result["internal_context"] = refined
 
         print("[CRAG] Generating Granite policy summary...")
+        t0 = time.time()
         result["summary"] = node_generate_summary(
             result["structured_brief"], refined, granite, "internal"
         )
+        t_granite = time.time() - t0
 
         # Bonus: Tavily explore results (fed into blueprint for richer context)
         print("[CRAG] Fetching Tavily explore results...")
-        explore = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=4)
+        t0 = time.time()
+        explore = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=3)
+        t_tavily = time.time() - t0
         result["explore_results"] = explore
         web_ctx = ""
         if explore:
@@ -1070,6 +1684,7 @@ def run_crag(
             web_ctx = _format_web_context(explore)
 
         print("[CRAG] Generating 6 blueprint sections (GPT-OSS/Groq)...")
+        t0 = time.time()
         result["blueprint"] = node_generate_blueprint(
             result["structured_brief"], result["summary"], web_ctx,
             sector, model_type, stage, target_city, groq_client, gpt_oss_client,
@@ -1078,20 +1693,25 @@ def run_crag(
             investor_context=refined,
             investor_sources=", ".join(result["sources"]) if result["sources"] else "DPIIT, Startup India, SIDBI, Incubator Databases"
         )
+        t_bp = time.time() - t0
 
     # ══════════════════════════════════════════════════════════════════════════
     # BRANCH: AMBIGUOUS
     # ══════════════════════════════════════════════════════════════════════════
     elif confidence == "AMBIGUOUS":
         result["action"] = (
-            "⚡ AMBIGUOUS — Partial relevance. Combining policy documents "
+            "[AMBIGUOUS] Partial relevance. Combining policy documents "
             "with live web search for richer context."
         )
         result["should_generate_blueprint"] = True
 
-        print("[CRAG] Branch: AMBIGUOUS → refining PDF + fetching web...")
-        refined  = node_refine(search_ctx, docs, raw_logits, reranker)
-        web_res  = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=4)
+        print("[CRAG] Branch: AMBIGUOUS -> refining PDF + fetching web...")
+        t0 = time.time()
+        refined  = node_refine(search_ctx, docs, raw_logits, reranker, top_k=6)
+        t_refine = time.time() - t0
+        t0 = time.time()
+        web_res  = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=3)
+        t_tavily = time.time() - t0
         web_ctx  = _format_web_context(web_res)
 
         result["internal_context"] = refined
@@ -1103,11 +1723,14 @@ def run_crag(
         )
 
         print("[CRAG] Generating Granite policy summary (combined)...")
+        t0 = time.time()
         result["summary"] = node_generate_summary(
             result["structured_brief"], combined, granite, "combined"
         )
+        t_granite = time.time() - t0
 
         print("[CRAG] Generating 6 blueprint sections (GPT-OSS/Groq)...")
+        t0 = time.time()
         result["blueprint"] = node_generate_blueprint(
             result["structured_brief"], result["summary"], web_ctx,
             sector, model_type, stage, target_city, groq_client, gpt_oss_client,
@@ -1116,6 +1739,7 @@ def run_crag(
             investor_context=combined,
             investor_sources=", ".join(result["sources"]) if result["sources"] else "Government & Market Databases"
         )
+        t_bp = time.time() - t0
 
         result["explore_results"] = web_res
         if web_res:
@@ -1126,13 +1750,15 @@ def run_crag(
     # ══════════════════════════════════════════════════════════════════════════
     else:
         result["action"] = (
-            "❌ INCORRECT — Knowledge base not relevant enough. "
-            "Searching the live web. No blueprint generated — refine your idea."
+            "[INCORRECT] Knowledge base not relevant enough. "
+            "Searching the live web. No blueprint generated - refine your idea."
         )
         result["should_generate_blueprint"] = False
 
-        print("[CRAG] Branch: INCORRECT → web-only answer...")
-        web_res = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=5)
+        print("[CRAG] Branch: INCORRECT -> web-only answer...")
+        t0 = time.time()
+        web_res = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=3)
+        t_tavily = time.time() - t0
         web_ctx = _format_web_context(web_res)
 
         result["external_context"] = web_ctx
@@ -1142,6 +1768,23 @@ def run_crag(
             result["structured_brief"], web_res, groq_client, gpt_oss_client
         )
         result["sources"] = ["tavily_web_search"] if web_res else []
+
+    t_total = time.time() - t_start
+
+    print(f"\n==================================================")
+    print(f"[PERF] Query rewrite: {t_rewrite:.2f}s")
+    print(f"[PERF] Chroma retrieval: {t_retrieve:.2f}s")
+    print(f"[PERF] CrossEncoder grading: {t_grade:.2f}s")
+    if t_refine > 0:
+        print(f"[PERF] Refine context: {t_refine:.2f}s")
+    if t_granite > 0:
+        print(f"[PERF] Granite summary: {t_granite:.2f}s")
+    if t_tavily > 0:
+        print(f"[PERF] Tavily explore: {t_tavily:.2f}s")
+    if t_bp > 0:
+        print(f"[PERF] Blueprint sections generation: {t_bp:.2f}s")
+    print(f"[PERF] TOTAL BLUEPRINT GENERATION: {t_total:.2f}s")
+    print(f"==================================================\n")
 
     print(f"[CRAG] Done. Blueprint: {result['should_generate_blueprint']}")
     return result

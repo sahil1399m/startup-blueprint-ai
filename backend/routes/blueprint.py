@@ -140,6 +140,7 @@ async def _stream_blueprint(
                 "budget":      bp.get("budget", {}),
                 "gtm":         bp.get("gtm", {}),
                 "investors":   bp.get("investors", {}),
+                "funding":     bp.get("investors", {}),
                 "competitors": bp.get("competitors", {}),
                 "risks":       bp.get("risks", {}),
                 "crag_trace":  bp.get("crag_trace", {}),
@@ -148,6 +149,10 @@ async def _stream_blueprint(
         # ── Step 7: Save to history ───────────────────────────────────────────
         yield _sse("progress", step="Saving blueprint to history…",
                    node="save", progress=97)
+
+        bp = crag_result.get("blueprint", {})
+        failed_sections = bp.get("failed_sections", [])
+        bp_status = bp.get("status", "partial" if failed_sections else "success")
 
         blueprint_id = None
         try:
@@ -162,22 +167,45 @@ async def _stream_blueprint(
                 investor_data=blueprint_data.get("investors", {}),
                 competitor_data=blueprint_data.get("competitors", {}),
                 risk_data=blueprint_data.get("risks", {}),
+                crag_trace_data=blueprint_data.get("crag_trace", {}),
                 explore_results=crag_result.get("explore_results", []),
+                failed_sections=failed_sections,
+                status=bp_status,
             )
         except Exception as e:
             log.warning(f"Failed to save blueprint to history: {e}")
 
         # ── Step 8: Complete ──────────────────────────────────────────────────
+        now_ts = datetime.utcnow().isoformat()
         response = BlueprintResponse(
             blueprint_id=blueprint_id,
+            id=blueprint_id,
             idea=body.idea,
+            original_query=body.idea,
             sector=body.sector,
             model_type=body.model_type,
+            business_model=body.model_type,
             stage=body.stage,
             target_city=body.target_city,
+            market=body.target_city,
+            status=bp_status,
+            failed_sections=failed_sections,
             crag_result=crag_result,
+            confidence=crag_result.get("confidence", ""),
+            summary=crag_result.get("summary", ""),
+            sources=crag_result.get("sources", []),
+            keywords=crag_result.get("keywords", []),
+            raw_logits=crag_result.get("raw_logits", []),
             blueprint=blueprint_data,
-            generated_at=datetime.utcnow().isoformat(),
+            bmc_data=blueprint_data.get("bmc", {}),
+            budget_data=blueprint_data.get("budget", {}),
+            gtm_data=blueprint_data.get("gtm", {}),
+            investor_data=blueprint_data.get("investors", {}),
+            funding_data=blueprint_data.get("funding", {}),
+            competitor_data=blueprint_data.get("competitors", {}),
+            risk_data=blueprint_data.get("risks", {}),
+            generated_at=now_ts,
+            timestamp=now_ts,
         )
         yield _sse("complete", step="Blueprint ready!", progress=100,
                    data=response.model_dump(mode="json"))

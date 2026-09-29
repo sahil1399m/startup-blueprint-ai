@@ -48,24 +48,32 @@ export default function CompetitorsTab({ data }) {
         <div className="space-y-6">
           <Card className="border-l-4 border-l-blue-500">
             <h3 className="text-[0.7rem] font-800 text-blue-400 uppercase tracking-wider mb-3">Our Differentiators</h3>
-            <ul className="space-y-2">
-              {data.our_differentiators?.map((diff, i) => (
-                <li key={i} className="flex gap-2 items-start text-sm text-slate-300">
-                  <span className="text-blue-500 mt-0.5">✦</span> <span>{diff}</span>
-                </li>
-              ))}
-            </ul>
+            {((data.our_differentiators || data.differentiators)?.length > 0) ? (
+              <ul className="space-y-2">
+                {(data.our_differentiators || data.differentiators)?.map((diff, i) => (
+                  <li key={i} className="flex gap-2 items-start text-sm text-slate-300">
+                    <span className="text-blue-500 mt-0.5">✦</span> <span>{diff}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-xs text-slate-500 italic">No specific differentiators listed.</div>
+            )}
           </Card>
           
           <Card className="border-l-4 border-l-amber-500">
             <h3 className="text-[0.7rem] font-800 text-amber-400 uppercase tracking-wider mb-3">Market Gaps</h3>
-            <ul className="space-y-2">
-              {data.market_gaps?.map((gap, i) => (
-                <li key={i} className="flex gap-2 items-start text-sm text-slate-300">
-                  <span className="text-amber-500 mt-0.5">◎</span> <span>{gap}</span>
-                </li>
-              ))}
-            </ul>
+            {((data.market_gaps || data.gaps)?.length > 0) ? (
+              <ul className="space-y-2">
+                {(data.market_gaps || data.gaps)?.map((gap, i) => (
+                  <li key={i} className="flex gap-2 items-start text-sm text-slate-300">
+                    <span className="text-amber-500 mt-0.5">◎</span> <span>{gap}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-xs text-slate-500 italic">No market gaps listed.</div>
+            )}
           </Card>
         </div>
 
@@ -76,7 +84,7 @@ export default function CompetitorsTab({ data }) {
             Competitive Strategy
           </h3>
           <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap flex-1">
-            {data.competitive_strategy}
+            {data.competitive_strategy || data.strategy || 'Competitive strategy positioning details unavailable.'}
           </p>
         </Card>
       </div>

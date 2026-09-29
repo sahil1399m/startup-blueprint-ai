@@ -1,21 +1,26 @@
 """
 mentor/synthesizer.py
 ──────────────────────
-IBM Granite 4.0 synthesizes a grounded, cited answer from the retrieved
-evidence. The synthesizer receives:
+Synthesizes a grounded, cited answer from retrieved evidence.
+
+PRIMARY model: Groq GPT-OSS-120B  (fast, low-latency)
+FALLBACK model: IBM Granite 4.0   (only if Groq is unavailable)
+
+The synthesizer receives:
   - blueprint context (always)
   - chromadb evidence (if retrieved)
   - tavily web evidence (if retrieved)
   - conversation history (sliding window)
   - the user's question + detected intent
 
-It produces:
-  - a rich markdown answer citing sources
-  - for EXECUTION_ROADMAP intent: a structured month-by-month roadmap
-  - for INVESTOR_PREP intent: numbered Q&A or investor questions
+It produces a rich markdown answer citing sources.
 """
 
 from __future__ import annotations
+import logging
+import time
+
+log = logging.getLogger(__name__)
 
 _BASE_SYSTEM = """You are an expert AI Startup Mentor with deep knowledge of the Indian startup ecosystem.
 
@@ -30,6 +35,8 @@ Rules:
 6. Maintain conversation continuity — reference previous questions if relevant.
 7. Format answers using clear headers, bullet points, and numbered lists where appropriate.
 8. If information is not in the provided context, say so clearly and suggest where the founder can find it.
+9. Do NOT invent funding schemes, regulations, market sizes, competitors, investors, statistics, or eligibility requirements.
+10. Clearly distinguish recommendations from sourced facts.
 """
 
 _INTENT_SYSTEM_ADDONS = {
@@ -69,6 +76,18 @@ When validating the market:
 - Suggest concrete validation experiments appropriate for this sector.
 - Cite any market data found in the retrieved context.
 """,
+    "RISK_ANALYSIS": """
+When analyzing risks:
+- Reference the specific risks listed in the blueprint.
+- Prioritize by severity (High → Medium → Low).
+- For each risk, provide a concrete mitigation strategy grounded in context.
+""",
+    "FUNDING": """
+When discussing funding:
+- Reference the funding roadmap and government schemes from the blueprint.
+- Specify amounts, timelines, and eligibility criteria when available.
+- Prioritize options most suitable for the startup's current stage.
+""",
 }
 
 
@@ -82,10 +101,12 @@ def synthesize_answer(
     tavily_context: str,
     conversation_history: str,
     granite_client,
+    groq_client=None,
     is_roadmap: bool = False,
 ) -> str:
     """
-    Call IBM Granite 4.0 to generate a cited, grounded answer.
+    Synthesize a grounded, cited answer using Groq GPT-OSS-120B (primary)
+    with IBM Granite as fallback.
 
     Parameters
     ----------
@@ -96,7 +117,8 @@ def synthesize_answer(
     chromadb_context     : text from ChromaDB PDF retrieval
     tavily_context       : text from Tavily web search
     conversation_history : recent conversation turns
-    granite_client       : IBM Granite ModelInference instance
+    granite_client       : IBM Granite ModelInference instance (fallback)
+    groq_client          : Groq client instance (primary)
     is_roadmap           : if True, use roadmap-specific formatting
 
     Returns
@@ -141,25 +163,62 @@ def synthesize_answer(
     else:
         user_prompt = _build_standard_prompt(question, intent, sub_topic, evidence_block, conv_block)
 
-    try:
-        response = granite_client.chat(
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user",   "content": user_prompt},
-            ],
-            params={
-                "max_tokens":  2400,
-                "temperature": 0.25,
-            }
-        )
-        return response["choices"][0]["message"]["content"].strip()
+    # ── PRIMARY: Groq GPT-OSS-120B ────────────────────────────────────────────
+    if groq_client is not None:
+        try:
+            t0 = time.time()
+            log.info("[MENTOR] Calling Groq GPT-OSS-120B for synthesis...")
+            from config import get_settings
+            settings = get_settings()
+            model_id = settings.GROQ_MODEL  # "openai/gpt-oss-120b"
 
-    except Exception as e:
-        print(f"[Synthesizer] Granite error: {e}")
-        return (
-            f"I encountered an error generating a grounded response. "
-            f"Error: {str(e)[:200]}"
-        )
+            resp = groq_client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=1200,
+            )
+            answer = resp.choices[0].message.content.strip()
+            elapsed = time.time() - t0
+            log.info(f"[MENTOR] Groq GPT-OSS-120B completed in {elapsed:.1f}s | tokens_approx={len(answer)//4}")
+            log.info("[MENTOR] Response validation: PASS (Groq)")
+            return answer
+
+        except Exception as groq_err:
+            log.warning(f"[MENTOR WARNING] Groq GPT-OSS-120B failed: {groq_err} — trying IBM Granite fallback")
+
+    # ── FALLBACK: IBM Granite ─────────────────────────────────────────────────
+    if granite_client is not None:
+        try:
+            t0 = time.time()
+            log.info("[MENTOR] Calling IBM Granite 4.0 (fallback)...")
+            response = granite_client.chat(
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                params={
+                    "max_tokens":  1200,
+                    "temperature": 0.3,
+                }
+            )
+            answer = response["choices"][0]["message"]["content"].strip()
+            elapsed = time.time() - t0
+            log.info(f"[MENTOR] IBM Granite fallback completed in {elapsed:.1f}s")
+            log.info("[MENTOR] Response validation: PASS (Granite fallback)")
+            return answer
+
+        except Exception as granite_err:
+            log.error(f"[MENTOR ERROR] IBM Granite fallback also failed: {granite_err}")
+
+    return (
+        "I encountered an error generating a response. "
+        "Both the primary (Groq GPT-OSS-120B) and fallback (IBM Granite) models are unavailable. "
+        "Please try again in a few moments."
+    )
 
 
 def _build_standard_prompt(question, intent, sub_topic, evidence, conv_history):

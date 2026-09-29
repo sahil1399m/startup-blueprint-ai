@@ -1,7 +1,7 @@
 """
 mentor/intent_classifier.py
 ────────────────────────────
-Classifies a user question into one of 14 mentor intents using Groq.
+Classifies a user question into one of 14 mentor intents using Groq GPT-OSS-120B.
 Returns a structured result consumed by tool_router.py.
 
 Intents
@@ -15,9 +15,12 @@ INVESTOR_PREP         EXECUTION_ROADMAP   GENERAL
 
 from __future__ import annotations
 import json
+import logging
 import re
 
 from config import get_settings
+
+log = logging.getLogger(__name__)
 
 INTENTS = [
     "MARKET_VALIDATION",
@@ -77,11 +80,16 @@ def classify_intent(
     """
     Classify the user's question into one of the 14 intents.
 
+    PRIMARY: Groq GPT-OSS-120B (fast, reliable)
+    FALLBACK: IBM GPT-OSS via watsonx (if Groq fails)
+    FINAL FALLBACK: keyword-based heuristic (always works)
+
     Parameters
     ----------
     question          : current user message
     conversation_tail : last 2-3 turns of conversation (for follow-up context)
-    groq_client       : Groq client instance
+    groq_client       : Groq client instance (primary)
+    gpt_oss_client    : IBM watsonx GPT-OSS client (fallback)
 
     Returns
     -------
@@ -92,7 +100,37 @@ def classify_intent(
         f"Current question: {question}"
     ) if conversation_tail.strip() else f"Question: {question}"
 
-    try:
+    settings = get_settings()
+
+    # ── PRIMARY: Groq GPT-OSS-120B ────────────────────────────────────────────
+    if groq_client is not None:
+        try:
+            resp = groq_client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                temperature=0.0,
+                max_tokens=120,
+                response_format={"type": "json_object"},
+            )
+            raw = resp.choices[0].message.content.strip()
+            result = json.loads(raw)
+            intent = result.get("intent", "GENERAL").upper()
+            if intent not in INTENTS:
+                intent = "GENERAL"
+            log.info(f"[MENTOR] Intent classified via Groq: {intent}")
+            return {
+                "intent":     intent,
+                "confidence": float(result.get("confidence", 0.8)),
+                "sub_topic":  result.get("sub_topic", ""),
+            }
+        except Exception as groq_err:
+            log.warning(f"[MENTOR] Groq intent classification failed: {groq_err}")
+
+    # ── FALLBACK: IBM GPT-OSS via watsonx ─────────────────────────────────────
+    if gpt_oss_client is not None:
         try:
             resp = gpt_oss_client.chat(
                 messages=[
@@ -108,31 +146,45 @@ def classify_intent(
             if start != -1 and end != -1 and end > start:
                 raw = raw[start:end+1]
             result = json.loads(raw)
-        except Exception as e:
-            print(f"[IntentClassifier] GPT-OSS failed, using Groq fallback: {e}")
-            resp = groq_client.chat.completions.create(
-                model=get_settings().GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.0,
-                max_tokens=120,
-                response_format={"type": "json_object"},
-            )
-            raw = resp.choices[0].message.content.strip()
-            result = json.loads(raw)
+            intent = result.get("intent", "GENERAL").upper()
+            if intent not in INTENTS:
+                intent = "GENERAL"
+            log.info(f"[MENTOR] Intent classified via IBM GPT-OSS (fallback): {intent}")
+            return {
+                "intent":     intent,
+                "confidence": float(result.get("confidence", 0.7)),
+                "sub_topic":  result.get("sub_topic", ""),
+            }
+        except Exception as ibm_err:
+            log.warning(f"[MENTOR] IBM GPT-OSS intent classification failed: {ibm_err}")
 
-        intent = result.get("intent", "GENERAL").upper()
-        if intent not in INTENTS:
-            intent = "GENERAL"
+    # ── FINAL FALLBACK: keyword heuristic (always works, zero latency) ─────────
+    intent = _keyword_intent(question)
+    log.info(f"[MENTOR] Intent classified via keyword heuristic (final fallback): {intent}")
+    return {"intent": intent, "confidence": 0.5, "sub_topic": ""}
 
-        return {
-            "intent":     intent,
-            "confidence": float(result.get("confidence", 0.7)),
-            "sub_topic":  result.get("sub_topic", ""),
-        }
 
-    except Exception as e:
-        print(f"[IntentClassifier] Error: {e}")
-        return {"intent": "GENERAL", "confidence": 0.5, "sub_topic": ""}
+def _keyword_intent(question: str) -> str:
+    """Fast keyword-based intent classification — used as final fallback."""
+    q = question.lower()
+    if any(w in q for w in ["risk", "threat", "danger", "challenge", "fail"]):
+        return "RISK_ANALYSIS"
+    if any(w in q for w in ["fund", "investor", "raise", "capital", "seed", "series", "vc"]):
+        return "FUNDING"
+    if any(w in q for w in ["competitor", "competition", "rival", "differentiat"]):
+        return "COMPETITOR"
+    if any(w in q for w in ["scheme", "dpiit", "msme", "government", "grant", "subsid"]):
+        return "GOVT_SCHEMES"
+    if any(w in q for w in ["market", "tam", "sam", "som", "feasib", "size"]):
+        return "MARKET_VALIDATION"
+    if any(w in q for w in ["roadmap", "timeline", "milestone", "execution", "month"]):
+        return "EXECUTION_ROADMAP"
+    if any(w in q for w in ["pitch", "deck", "due diligence", "valuation"]):
+        return "INVESTOR_PREP"
+    if any(w in q for w in ["gtm", "go-to-market", "launch", "distribut", "channel"]):
+        return "GTM"
+    if any(w in q for w in ["budget", "revenue", "profit", "cost", "expense", "financial"]):
+        return "FINANCIAL"
+    if any(w in q for w in ["legal", "compliance", "regulat", "license", "rbi", "sebi"]):
+        return "LEGAL"
+    return "GENERAL"

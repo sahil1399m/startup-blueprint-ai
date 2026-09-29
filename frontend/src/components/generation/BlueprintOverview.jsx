@@ -8,10 +8,17 @@ import { MetricCard, Badge } from '../ui'
 export default function BlueprintOverview({ blueprint }) {
   if (!blueprint) return null
 
-  const { crag_result = {}, blueprint: bp = {} } = blueprint
-  const budget = bp?.budget || {}
-  const investors = bp?.investors || {}
-  const bmc = bp?.bmc || {}
+  const bp = blueprint.blueprint || {}
+  const crag = blueprint.crag_result || blueprint
+  const budget = bp.budget || blueprint.budget_data || {}
+  const investors = bp.investors || blueprint.investor_data || {}
+  const bmc = bp.bmc || blueprint.bmc_data || {}
+
+  const summary = crag?.summary || blueprint.summary
+  const confidence = crag?.confidence || blueprint.confidence
+  const maxLogit = crag?.max_logit !== undefined ? crag.max_logit : blueprint.max_logit
+  const sources = crag?.sources || blueprint.sources || []
+  const usedWebFallback = crag?.used_web_fallback || blueprint.used_web_fallback
 
   const formatLakhs = (val) => val ? `₹${(val / 100000).toFixed(1)}L` : '—'
 
@@ -23,7 +30,7 @@ export default function BlueprintOverview({ blueprint }) {
       </div>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
         <MetricCard
-          value={crag_result?.summary ? '✓' : '—'}
+          value={summary ? '✓' : '—'}
           label="Policy Brief"
           sub="IBM Granite"
         />
@@ -41,7 +48,7 @@ export default function BlueprintOverview({ blueprint }) {
           sub="via CRAG"
         />
         <MetricCard
-          value={crag_result?.confidence ? `${crag_result.confidence} (${crag_result.max_logit?.toFixed(2) || 0})` : '—'}
+          value={confidence ? `${confidence}${maxLogit !== undefined ? ` (${Number(maxLogit).toFixed(2)})` : ''}` : '—'}
           label="CRAG Confidence"
         />
       </div>
@@ -52,16 +59,16 @@ export default function BlueprintOverview({ blueprint }) {
         <Badge variant="purple">Groq Llama 3.3</Badge>
         <Badge variant="amber">✨ Gemini Flash</Badge>
         <Badge variant={
-          crag_result?.confidence === 'CORRECT' ? 'green' :
-          crag_result?.confidence === 'AMBIGUOUS' ? 'amber' : 'red'
+          confidence === 'CORRECT' ? 'green' :
+          confidence === 'AMBIGUOUS' ? 'amber' : 'red'
         }>
-          CRAG: {crag_result?.confidence}
+          CRAG: {confidence || '—'}
         </Badge>
-        {crag_result?.used_web_fallback && (
+        {usedWebFallback && (
           <Badge variant="red">🌐 Tavily Fallback</Badge>
         )}
         <span className="text-[0.71rem] text-slate-600 self-center ml-1">
-          Sources: {crag_result?.sources?.join(', ') || '—'}
+          Sources: {sources?.join(', ') || '—'}
         </span>
       </div>
     </div>

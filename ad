@@ -1,0 +1,25 @@
+warning: in the working copy of 'backend/core/mentor/intent_classifier.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/core/mentor/mentor_agent.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/core/mentor/mentor_db.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/core/mentor/synthesizer.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/models/blueprint.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/routes/mentor.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/components/blueprint/BlueprintTabs.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/components/blueprint/CompetitorsTab.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/components/blueprint/InvestorsTab.jsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/src/components/generation/BlueprintOverview.jsx', LF will be replaced by CRLF the next time Git touches it
+ backend/core/crag.py                               | 1653 [32m++++++++++++++[m[31m------[m
+ backend/core/history.py                            |  105 [32m+[m[31m-[m
+ backend/core/mentor/intent_classifier.py           |  108 [32m+[m[31m-[m
+ backend/core/mentor/mentor_agent.py                |   84 [32m+[m[31m-[m
+ backend/core/mentor/mentor_db.py                   |  178 [32m+[m[31m--[m
+ backend/core/mentor/synthesizer.py                 |  113 [32m+[m[31m-[m
+ backend/models/blueprint.py                        |   42 [32m+[m[31m-[m
+ backend/models/mentor.py                           |   41 [32m+[m[31m-[m
+ backend/routes/blueprint.py                        |   30 [32m+[m[31m-[m
+ backend/routes/mentor.py                           |  162 [32m+[m[31m-[m
+ .../src/components/blueprint/BlueprintTabs.jsx     |   42 [32m+[m[31m-[m
+ .../src/components/blueprint/CompetitorsTab.jsx    |   38 [32m+[m[31m-[m
+ frontend/src/components/blueprint/InvestorsTab.jsx |   92 [32m+[m[31m-[m
+ .../components/generation/BlueprintOverview.jsx    |   29 [32m+[m[31m-[m
+ 14 files changed, 1885 insertions(+), 832 deletions(-)
