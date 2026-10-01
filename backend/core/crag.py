@@ -1747,15 +1747,15 @@ def run_crag(
 
     # ══════════════════════════════════════════════════════════════════════════
     # BRANCH: INCORRECT
+    # Internal knowledge-base retrieval was not relevant enough.
+    # We always fall back to live web search first.
+    # - If Tavily returns usable results  -> generate a full blueprint from web
+    #   context (same pattern as AMBIGUOUS but without any PDF context).
+    # - If Tavily also returns nothing    -> conversational redirect.
+    # This matches the architecture diagram at the top of this file.
     # ══════════════════════════════════════════════════════════════════════════
     else:
-        result["action"] = (
-            "[INCORRECT] Knowledge base not relevant enough. "
-            "Searching the live web. No blueprint generated - refine your idea."
-        )
-        result["should_generate_blueprint"] = False
-
-        print("[CRAG] Branch: INCORRECT -> web-only answer...")
+        print("[CRAG] Branch: INCORRECT -> performing live web search...")
         t0 = time.time()
         web_res = node_web_search(search_ctx, rewrite["retrieval_queries"], tavily, sector, max_results=3)
         t_tavily = time.time() - t0
@@ -1763,11 +1763,53 @@ def run_crag(
 
         result["external_context"] = web_ctx
         result["explore_results"]  = web_res
-
-        result["conversational_response"] = node_conversational_answer(
-            result["structured_brief"], web_res, groq_client, gpt_oss_client
-        )
         result["sources"] = ["tavily_web_search"] if web_res else []
+
+        if web_res:
+            # ── Web search succeeded: generate blueprint from web context ─────
+            result["action"] = (
+                "[INCORRECT] Internal knowledge base not relevant. "
+                "Blueprint generated from live web search context."
+            )
+            result["should_generate_blueprint"] = True
+
+            print("[CRAG] INCORRECT branch: Tavily returned results — generating blueprint from web context...")
+
+            print("[CRAG] Generating Granite policy summary (web-only)...")
+            t0 = time.time()
+            try:
+                result["summary"] = node_generate_summary(
+                    result["structured_brief"], web_ctx, granite, "combined"
+                )
+            except Exception as e:
+                print(f"[CRAG] Granite summary failed in INCORRECT branch: {e}. Continuing without summary.")
+                result["summary"] = ""
+            t_granite = time.time() - t0
+
+            print("[CRAG] Generating 6 blueprint sections from web context (GPT-OSS/Groq)...")
+            t0 = time.time()
+            result["blueprint"] = node_generate_blueprint(
+                result["structured_brief"], result["summary"], web_ctx,
+                sector, model_type, stage, target_city, groq_client, gpt_oss_client,
+                policy_sources="tavily_web_search",
+                policy_crag=web_ctx,
+                investor_context=web_ctx,
+                investor_sources="Tavily Web Search"
+            )
+            t_bp = time.time() - t0
+
+        else:
+            # ── Web search also returned nothing: conversational redirect ──────
+            result["action"] = (
+                "[INCORRECT] Knowledge base not relevant enough. "
+                "Searching the live web. No blueprint generated - refine your idea."
+            )
+            result["should_generate_blueprint"] = False
+
+            print("[CRAG] INCORRECT branch: Tavily also returned no results — conversational redirect.")
+            result["conversational_response"] = node_conversational_answer(
+                result["structured_brief"], web_res, groq_client, gpt_oss_client
+            )
 
     t_total = time.time() - t_start
 
