@@ -347,31 +347,68 @@ def node_eval_each_doc(query, docs, reranker):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# NODE: refine  (decompose-then-recompose knowledge refinement)
+# HELPER: _select_top_docs
+# Zero extra CrossEncoder inference — reuses logits already computed in Step 3.
+# Used by the CORRECT branch so node_refine's second reranker.predict() call
+# (which caused Railway worker restart via multi-minute CPU spike) is avoided.
 # ══════════════════════════════════════════════════════════════════════════════
+def _select_top_docs(docs, raw_logits, top_k=6):
+    """
+    Return the top-k docs sorted by the raw logit already computed in
+    node_eval_each_doc.  No CrossEncoder call is made.
+    """
+    if not docs:
+        return ""
+    paired = sorted(zip(raw_logits, docs), key=lambda x: x[0], reverse=True)
+    top_docs = [d for _, d in paired[:top_k] if _ >= LOWER_THRESHOLD] or [paired[0][1]]
+    return "\n\n".join(top_docs)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NODE: refine  (decompose-then-recompose knowledge refinement)
+# NOTE: Only called from the AMBIGUOUS branch.  The CORRECT branch uses
+#       _select_top_docs instead (zero extra CrossEncoder inference).
+#
+# SAFETY CAPS added to prevent Railway worker restart:
+#   1. Strips are capped at MAX_REFINE_STRIPS before reranker.predict().
+#   2. The entire function is wrapped in try/except; on any failure it falls
+#      back to _select_top_docs so the pipeline always continues.
+# ══════════════════════════════════════════════════════════════════════════════
+MAX_REFINE_STRIPS = 60   # hard cap on pairs fed to the second CrossEncoder run
+
 def node_refine(query, docs, raw_logits, reranker, top_k=5):
     """
     Sentence-level re-ranking inside each relevant doc.
     Strips low-relevance sentences and returns only the most on-topic strips.
+    Falls back to _select_top_docs if reranker inference fails or times out.
     """
-    all_strips = []
-    for doc, logit in zip(docs, raw_logits):
-        if logit < LOWER_THRESHOLD:
-            continue
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', doc) if len(s.strip()) > 30]
-        # Group into sentence pairs for context
-        for i in range(0, len(sentences), 2):
-            group = " ".join(sentences[i:i+2])
-            if group:
-                all_strips.append(group)
+    try:
+        all_strips = []
+        for doc, logit in zip(docs, raw_logits):
+            if logit < LOWER_THRESHOLD:
+                continue
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', doc) if len(s.strip()) > 30]
+            # Group into sentence pairs for context
+            for i in range(0, len(sentences), 2):
+                group = " ".join(sentences[i:i+2])
+                if group:
+                    all_strips.append(group)
+                if len(all_strips) >= MAX_REFINE_STRIPS:
+                    break
+            if len(all_strips) >= MAX_REFINE_STRIPS:
+                break
 
-    if not all_strips:
-        return "\n\n".join(docs[:3])
+        if not all_strips:
+            return "\n\n".join(docs[:3])
 
-    strip_scores  = reranker.predict([(query, s) for s in all_strips])
-    scored        = sorted(zip(strip_scores, all_strips), key=lambda x: x[0], reverse=True)
-    top_strips    = [s for _, s in scored[:top_k]]
-    return "\n\n".join(top_strips) if top_strips else "\n\n".join(docs[:2])
+        print(f"[CRAG] node_refine: scoring {len(all_strips)} sentence strips (cap={MAX_REFINE_STRIPS})")
+        strip_scores  = reranker.predict([(query, s) for s in all_strips])
+        scored        = sorted(zip(strip_scores, all_strips), key=lambda x: x[0], reverse=True)
+        top_strips    = [s for _, s in scored[:top_k]]
+        return "\n\n".join(top_strips) if top_strips else "\n\n".join(docs[:2])
+    except Exception as refine_err:
+        print(f"[CRAG] node_refine failed ({refine_err}); falling back to logit-sorted docs.")
+        return _select_top_docs(docs, raw_logits, top_k=top_k)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1659,9 +1696,13 @@ def run_crag(
         )
         result["should_generate_blueprint"] = True
 
-        print("[CRAG] Branch: CORRECT -> refining PDF context...")
+        # PERF FIX: avoid second CrossEncoder run (caused Railway worker restart
+        # via ~3-6 min CPU spike on 80+ sentence-pair strips).
+        # The CORRECT branch already has CrossEncoder scores from Step 3;
+        # _select_top_docs reuses those logits with zero extra model inference.
+        print("[CRAG] Branch: CORRECT -> selecting top PDF chunks (logit-sorted, no extra reranker call)...")
         t0 = time.time()
-        refined = node_refine(search_ctx, docs, raw_logits, reranker, top_k=6)
+        refined = _select_top_docs(docs, raw_logits, top_k=6)
         t_refine = time.time() - t0
         result["internal_context"] = refined
 
@@ -1707,6 +1748,8 @@ def run_crag(
 
         print("[CRAG] Branch: AMBIGUOUS -> refining PDF + fetching web...")
         t0 = time.time()
+        # node_refine is bounded (MAX_REFINE_STRIPS=60) and has a fallback to
+        # _select_top_docs so it cannot kill the process.
         refined  = node_refine(search_ctx, docs, raw_logits, reranker, top_k=6)
         t_refine = time.time() - t0
         t0 = time.time()
