@@ -1,22 +1,36 @@
 import { create } from 'zustand'
 import { authApi } from '../api/auth'
 
-const stored = () => {
+const getStoredUser = () => {
   try {
     const u = localStorage.getItem('user')
     return u ? JSON.parse(u) : null
-  } catch { return null }
+  } catch {
+    return null
+  }
 }
 
-export const useAuthStore = create((set) => ({
-  user:        stored(),
-  token:       localStorage.getItem('access_token') || null,
-  isLoggedIn:  !!localStorage.getItem('access_token'),
+const getStoredToken = () => {
+  const token = localStorage.getItem('access_token')
+  return token && token.trim().length > 0 ? token : null
+}
+
+export const useAuthStore = create((set, get) => ({
+  user:       getStoredUser(),
+  token:      getStoredToken(),
+  isLoggedIn: Boolean(getStoredToken()),
 
   login: (user, token) => {
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      console.warn('Attempted to log in without a valid token')
+      return false
+    }
     localStorage.setItem('access_token', token)
-    localStorage.setItem('user', JSON.stringify(user))
-    set({ user, token, isLoggedIn: true })
+    if (user) {
+      localStorage.setItem('user', JSON.stringify(user))
+    }
+    set({ user: user || get().user, token, isLoggedIn: true })
+    return true
   },
 
   logout: () => {
@@ -33,16 +47,21 @@ export const useAuthStore = create((set) => ({
 
   /** Call on app mount — refreshes user profile (name, blueprints_generated) from server. */
   hydrate: async () => {
-    const token = localStorage.getItem('access_token')
-    if (!token) return
+    const token = getStoredToken()
+    if (!token) {
+      get().logout()
+      return
+    }
     try {
       const { data } = await authApi.me()
-      const prev = JSON.parse(localStorage.getItem('user') || '{}')
+      const prev = getStoredUser() || {}
       const updated = { ...prev, ...data }
       localStorage.setItem('user', JSON.stringify(updated))
-      set({ user: updated })
-    } catch {
-      // 401 → axios interceptor handles redirect to /login
+      set({ user: updated, isLoggedIn: true })
+    } catch (err) {
+      if (err.response?.status === 401) {
+        get().logout()
+      }
     }
   },
 }))

@@ -15,14 +15,20 @@ client.interceptors.request.use((config) => {
   return config
 })
 
-// On 401 — clear token and redirect to login
+// On 401 — clear token and redirect to login (only for protected endpoints, not login/register attempts)
 client.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const isAuthRoute = err.config?.url?.includes('/api/auth/login') ||
+                        err.config?.url?.includes('/api/auth/register') ||
+                        err.config?.url?.includes('/api/auth/google')
+
+    if (err.response?.status === 401 && !isAuthRoute) {
       localStorage.removeItem('access_token')
       localStorage.removeItem('user')
-      window.location.href = '/login'
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(err)
   }

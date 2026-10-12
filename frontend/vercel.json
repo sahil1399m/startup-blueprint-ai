@@ -3,6 +3,10 @@
     {
       "source": "/api/(.*)",
       "destination": "https://startup-blueprint-ai-production-c87b.up.railway.app/api/$1"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

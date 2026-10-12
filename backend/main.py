@@ -164,6 +164,7 @@ async def public_config():
     return {
         "supabase_url":      settings.SUPABASE_URL,
         "supabase_anon_key": settings.SUPABASE_KEY,
+        "google_client_id":  settings.GOOGLE_CLIENT_ID,
     }
 
 

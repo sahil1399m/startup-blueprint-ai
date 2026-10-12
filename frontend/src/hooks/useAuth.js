@@ -5,12 +5,14 @@ import { authApi } from '../api/auth'
 /**
  * useAuth — custom hook wrapping authStore + auth API calls.
  *
- * Returns { user, isLoggedIn, loading, error, login, register, logout }
+ * Returns { user, isLoggedIn, loading, error, login, register, googleLogin, logout, clearError }
  */
 export function useAuth() {
   const { user, isLoggedIn, login: storeLogin, logout: storeLogout } = useAuthStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+
+  const clearError = useCallback(() => setError(null), [])
 
   const login = useCallback(async (email, password) => {
     setError(null)
@@ -20,7 +22,7 @@ export function useAuth() {
       storeLogin(data.user, data.access_token)
       return data
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Invalid credentials'
+      const msg = err.response?.data?.detail || 'Invalid email or password'
       setError(msg)
       throw err
     } finally {
@@ -44,6 +46,22 @@ export function useAuth() {
     }
   }, [storeLogin])
 
+  const googleLogin = useCallback(async (code, redirectUri, state) => {
+    setError(null)
+    setLoading(true)
+    try {
+      const { data } = await authApi.googleCallback(code, redirectUri, state)
+      storeLogin(data.user, data.access_token)
+      return data
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Google sign-in failed'
+      setError(msg)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [storeLogin])
+
   const logout = useCallback(async () => {
     try {
       await authApi.logout()
@@ -51,5 +69,5 @@ export function useAuth() {
     storeLogout()
   }, [storeLogout])
 
-  return { user, isLoggedIn, loading, error, login, register, logout }
+  return { user, isLoggedIn, loading, error, login, register, googleLogin, logout, clearError }
 }

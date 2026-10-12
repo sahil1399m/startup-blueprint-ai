@@ -1,267 +1,457 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Rocket, Eye, EyeOff, ArrowRight, Chrome } from 'lucide-react'
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom'
+import { Rocket, Eye, EyeOff, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { authApi } from '../api/auth'
 import { useAuthStore } from '../store/authStore'
-import { blueprintApi } from '../api/blueprint'
-import { Spinner, KeywordChip } from '../components/ui'
+import { Spinner } from '../components/ui'
+import NewsPanel from '../components/auth/NewsPanel'
 
-const TRENDS = [
-  'AI & ML', 'Fintech Unicorns', 'Agritech', 'EV Ecosystem', 'D2C Brands',
-  'SaaS for SMBs', 'HealthTech', 'EdTech 2.0', 'Climate Tech', 'Deep Tech',
-  'B2B Commerce', 'ONDC', 'Logistics Tech', 'Deep Tech',
-]
-
-const STATS = [
-  { val: '₹12T', label: 'Indian Startup Market' },
-  { val: '112', label: 'Unicorns in India' },
-  { val: '1.5L+', label: 'DPIIT Startups' },
-  { val: '6', label: 'AI Models' },
-]
-
-const CAT_COLORS = {
-  Funding: { text: '#34d399', bg: 'rgba(52,211,153,0.09)', border: 'rgba(52,211,153,0.2)' },
-  Unicorns: { text: '#a78bfa', bg: 'rgba(167,139,250,0.09)', border: 'rgba(167,139,250,0.2)' },
-  Policy: { text: '#60a5fa', bg: 'rgba(96,165,250,0.09)', border: 'rgba(96,165,250,0.2)' },
-  Info: { text: '#94a3b8', bg: 'rgba(148,163,184,0.09)', border: 'rgba(148,163,184,0.2)' },
+function GoogleIcon({ className = "w-5 h-5" }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+      />
+    </svg>
+  )
 }
 
 export default function Login() {
   const navigate = useNavigate()
-  const { login } = useAuthStore()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
+  const login = useAuthStore((s) => s.login)
+
   const [tab, setTab] = useState('signin')
   const [showPw, setShowPw] = useState(false)
+  const [showConfirmPw, setShowConfirmPw] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [googleLoading, setGoogleLoading] = useState(false)
   const [error, setError] = useState('')
-  const [news, setNews] = useState([])
+  const [successMsg, setSuccessMsg] = useState('')
 
   // Form state
   const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' })
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const setField = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
+  const targetPath = location.state?.from?.pathname || '/dashboard'
+
+  // Handle URL errors (e.g. from callback redirect)
   useEffect(() => {
-    blueprintApi.getNews('India startup funding').then((r) => setNews(r.data?.articles || [])).catch(() => { })
-  }, [])
+    const urlError = searchParams.get('error')
+    if (urlError) {
+      setError(decodeURIComponent(urlError))
+    }
+  }, [searchParams])
 
   const handleSignIn = async (e) => {
     e.preventDefault()
-    setError(''); setLoading(true)
+    setError('')
+    setSuccessMsg('')
+    setLoading(true)
+
     try {
       const { data } = await authApi.login(form.email, form.password)
+      if (!data?.access_token) {
+        throw new Error('Authentication succeeded but no access token was returned.')
+      }
       login(data.user, data.access_token)
-      navigate('/dashboard')
+      navigate(targetPath, { replace: true })
     } catch (err) {
-      setError(err.response?.data?.detail || 'Invalid credentials')
-    } finally { setLoading(false) }
+      const msg = err.response?.data?.detail || err.message || 'Invalid email or password'
+      setError(msg)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const handleRegister = async (e) => {
     e.preventDefault()
     setError('')
-    if (form.password !== form.confirm) { setError('Passwords do not match'); return }
-    if (form.password.length < 6) { setError('Password must be at least 6 characters'); return }
+    setSuccessMsg('')
+
+    if (form.password !== form.confirm) {
+      setError('Passwords do not match. Please re-enter.')
+      return
+    }
+    if (form.password.length < 6) {
+      setError('Password must be at least 6 characters long.')
+      return
+    }
+
     setLoading(true)
     try {
       const { data } = await authApi.register(form.name, form.email, form.password)
+      if (!data?.access_token) {
+        throw new Error('Registration completed but session creation failed. Please sign in.')
+      }
       login(data.user, data.access_token)
-      navigate('/dashboard')
+      navigate(targetPath, { replace: true })
     } catch (err) {
-      setError(err.response?.data?.detail || 'Registration failed')
-    } finally { setLoading(false) }
+      const msg = err.response?.data?.detail || err.message || 'Registration failed'
+      setError(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGoogleSignIn = async () => {
+    setError('')
+    setGoogleLoading(true)
+    try {
+      sessionStorage.setItem('auth_target_path', targetPath)
+      const callbackUrl = window.location.origin + '/auth/callback'
+      const res = await authApi.getGoogleAuthUrl(callbackUrl)
+      if (res.data?.url) {
+        window.location.href = res.data.url
+      } else {
+        throw new Error('Could not generate Google authorization URL.')
+      }
+    } catch (err) {
+      setGoogleLoading(false)
+      const msg = err.response?.data?.detail || err.message || 'Failed to initialize Google OAuth.'
+      setError(msg)
+    }
   }
 
   return (
-    <div className="min-h-screen grid md:grid-cols-[3fr_2fr] gap-0">
-
+    <div className="min-h-screen grid md:grid-cols-[3fr_2fr] gap-0 bg-[#04040f]">
       {/* ── Left: News panel ── */}
-      <div className="hidden md:flex flex-col p-10 border-r border-white/[0.052] overflow-y-auto">
-        {/* Hero */}
-        <div className="mb-8">
-          <div className="inline-flex items-center gap-2 bg-blue-500/[0.09] border border-blue-500/20
-            rounded-full px-3 py-1 text-[0.71rem] font-700 text-blue-300 uppercase tracking-wider mb-5">
-            🚀 AI-Powered Startup Intelligence
-          </div>
-          <h1 className="text-5xl font-black tracking-tight leading-[1.05] gradient-text mb-4">
-            Build Your Startup<br />Blueprint in Minutes
-          </h1>
-          <div className="flex flex-wrap gap-1.5 mb-6">
-            <span className="badge badge-blue">IBM Granite 4.0</span>
-            <span className="badge badge-purple">Groq Llama 3.3</span>
-            <span className="badge badge-amber">✨ Gemini Flash</span>
-            <span className="badge badge-green">CRAG Self-Correcting</span>
-            <span className="badge badge-red">🔴 LIVE Web Search</span>
-          </div>
-
-          {/* Stats */}
-          <div className="grid grid-cols-4 gap-3 mb-8">
-            {STATS.map(({ val, label }) => (
-              <div key={label}
-                className="rounded-2xl border border-white/[0.07] bg-gradient-to-br from-blue-500/[0.075] to-purple-500/[0.075]
-                  p-3 text-center backdrop-blur-sm">
-                <div className="text-xl font-900 gradient-text-blue">{val}</div>
-                <div className="text-[0.62rem] text-slate-500 font-700 uppercase tracking-wider mt-1">{label}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Trends */}
-          <div className="text-[0.67rem] font-700 text-slate-500 uppercase tracking-wider mb-2">
-            🔥 Trending in Indian Startup Ecosystem
-          </div>
-          <div className="mb-6 flex flex-wrap">
-            {TRENDS.map((t) => <KeywordChip key={t}>{t}</KeywordChip>)}
-          </div>
-        </div>
-
-        {/* News */}
-        <div className="text-[0.67rem] font-700 text-slate-500 uppercase tracking-wider mb-3">
-          📰 Latest Startup News
-        </div>
-        <div className="space-y-2 flex-1">
-          {news.length === 0 && (
-            <div className="text-sm text-slate-600 italic">Add NEWS_API_KEY for live news</div>
-          )}
-          {news.slice(0, 8).map((a, i) => {
-            const cat = a._cat || 'Info'
-            const c = CAT_COLORS[cat] || CAT_COLORS.Info
-            return (
-              <div key={i} className="news-card p-3">
-                <span className="text-[0.63rem] font-700 rounded-lg px-2 py-0.5"
-                  style={{ color: c.text, background: c.bg, border: `1px solid ${c.border}` }}>
-                  {cat}
-                </span>
-                <div className="text-sm font-600 text-slate-200 mt-1.5 mb-1 leading-snug line-clamp-2">
-                  {a.title}
-                </div>
-                <div className="text-[0.72rem] text-slate-500">
-                  <span style={{ color: c.text, fontWeight: 600 }}>{a.source?.name}</span>
-                  {' '}· {a.publishedAt?.slice(0, 10)}
-                  {' '}·{' '}
-                  <a href={a.url} target="_blank" rel="noreferrer"
-                    className="text-blue-400 hover:text-blue-300 font-500">Read →</a>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
+      <NewsPanel />
 
       {/* ── Right: Auth form ── */}
-      <div className="flex items-center justify-center p-8 min-h-screen md:min-h-0">
+      <div className="flex items-center justify-center p-6 md:p-10 min-h-screen md:min-h-0">
         <div className="w-full max-w-md">
-          {/* Logo */}
-          <div className="text-center mb-7">
+          {/* Logo & Header */}
+          <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl
               bg-gradient-to-br from-blue-600 to-purple-700 text-2xl mb-3 shadow-glow-blue">
               🚀
             </div>
-            <h2 className="text-2xl font-800 text-slate-100 tracking-tight">Welcome Back</h2>
-            <p className="text-sm text-slate-500 mt-1">Sign in to generate your startup blueprint</p>
+            <h2 className="text-2xl font-800 text-slate-100 tracking-tight">
+              {tab === 'signin' ? 'Welcome Back' : 'Create Your Account'}
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              {tab === 'signin'
+                ? 'Sign in to access your blueprints and startup tools'
+                : 'Get started with AI-powered startup intelligence'}
+            </p>
           </div>
 
-          {/* Tab switcher */}
-          <div className="flex border border-white/[0.062] rounded-xl p-1 mb-5 bg-white/[0.02]">
-            {[['signin', '🔑  Sign In'], ['register', '📝  Register']].map(([key, label]) => (
-              <button key={key} onClick={() => { setTab(key); setError('') }}
-                className={`flex-1 py-2 rounded-lg text-sm font-700 transition-all duration-150
-                  ${tab === key
-                    ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25'
-                    : 'text-slate-500 hover:text-slate-300'}`}>
-                {label}
-              </button>
-            ))}
+          {/* Tab Switcher */}
+          <div className="flex border border-white/[0.08] rounded-xl p-1 mb-5 bg-white/[0.02]">
+            <button
+              type="button"
+              id="tab-signin"
+              onClick={() => { setTab('signin'); setError(''); setSuccessMsg('') }}
+              className={`flex-1 py-2 rounded-lg text-xs font-700 transition-all duration-150 ${
+                tab === 'signin'
+                  ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              id="tab-register"
+              onClick={() => { setTab('register'); setError(''); setSuccessMsg('') }}
+              className={`flex-1 py-2 rounded-lg text-xs font-700 transition-all duration-150 ${
+                tab === 'register'
+                  ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              Create Account
+            </button>
           </div>
 
-          {/* Error */}
+          {/* Feedback Messages */}
           {error && (
-            <div className="bg-red-500/[0.09] border border-red-500/20 rounded-xl px-4 py-3
-              text-sm text-red-400 mb-4 animate-fade-in">
-              {error}
+            <div
+              role="alert"
+              className="bg-red-500/[0.09] border border-red-500/25 rounded-xl px-4 py-3
+                text-xs text-red-400 mb-4 flex items-start gap-2.5 animate-fade-in"
+            >
+              <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{error}</span>
             </div>
           )}
 
-          {/* Sign In */}
-          {tab === 'signin' && (
-            <form onSubmit={handleSignIn} className="space-y-4 animate-fade-in">
-              <InputField label="Email Address" type="email" placeholder="you@example.com"
-                value={form.email} onChange={set('email')} required />
-              <div className="relative">
-                <InputField label="Password" type={showPw ? 'text' : 'password'}
-                  placeholder="••••••••" value={form.password} onChange={set('password')} required />
-                <button type="button" onClick={() => setShowPw(!showPw)}
-                  className="absolute right-3 bottom-3 text-slate-500 hover:text-slate-300">
-                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-              <button type="submit" disabled={loading}
-                className="btn-primary w-full py-3 flex items-center justify-center gap-2 mt-2">
-                {loading ? <Spinner size={18} /> : <><span>Sign In</span><ArrowRight size={16} /></>}
-              </button>
-            </form>
+          {successMsg && (
+            <div
+              role="status"
+              className="bg-emerald-500/[0.09] border border-emerald-500/25 rounded-xl px-4 py-3
+                text-xs text-emerald-400 mb-4 flex items-start gap-2.5 animate-fade-in"
+            >
+              <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{successMsg}</span>
+            </div>
           )}
 
-          {/* Register */}
-          {tab === 'register' && (
-            <form onSubmit={handleRegister} className="space-y-4 animate-fade-in">
-              <InputField label="Full Name" placeholder="Priya Sharma"
-                value={form.name} onChange={set('name')} required />
-              <InputField label="Email Address" type="email" placeholder="you@example.com"
-                value={form.email} onChange={set('email')} required />
-              <InputField label="Password" type="password" placeholder="Minimum 6 characters"
-                value={form.password} onChange={set('password')} required />
-              <InputField label="Confirm Password" type="password" placeholder="Re-enter password"
-                value={form.confirm} onChange={set('confirm')} required />
-              <button type="submit" disabled={loading}
-                className="btn-primary w-full py-3 flex items-center justify-center gap-2 mt-2">
-                {loading ? <Spinner size={18} /> : <><span>Create Account</span><ArrowRight size={16} /></>}
-              </button>
-            </form>
-          )}
+          {/* Google OAuth Button */}
+          <button
+            type="button"
+            id="google-oauth-btn"
+            onClick={handleGoogleSignIn}
+            disabled={googleLoading || loading}
+            className="w-full py-3 px-4 rounded-xl border border-white/[0.12] bg-white/[0.04]
+              hover:bg-white/[0.08] hover:border-white/[0.2] transition-all duration-150
+              flex items-center justify-center gap-3 text-xs font-700 text-slate-200
+              disabled:opacity-50 disabled:cursor-not-allowed shadow-sm mb-4 cursor-pointer"
+          >
+            {googleLoading ? (
+              <Spinner size={16} />
+            ) : (
+              <>
+                <GoogleIcon />
+                <span>Continue with Google</span>
+              </>
+            )}
+          </button>
 
           {/* Divider */}
-          <div className="flex items-center gap-3 my-5">
-            <div className="flex-1 h-px bg-white/[0.062]" />
-            <span className="text-xs text-slate-600">or</span>
-            <div className="flex-1 h-px bg-white/[0.062]" />
+          <div className="flex items-center gap-3 my-4">
+            <div className="flex-1 h-px bg-white/[0.08]" />
+            <span className="text-[0.68rem] font-600 text-slate-600 uppercase tracking-wider">
+              or continue with email
+            </span>
+            <div className="flex-1 h-px bg-white/[0.08]" />
           </div>
 
-          {/* What's inside */}
-          <div className="bg-blue-500/[0.036] border border-blue-500/[0.092] rounded-2xl p-4 mt-4">
-            <div className="text-[0.67rem] font-700 text-slate-500 uppercase tracking-wider mb-3">
-              What's inside your blueprint
-            </div>
-            <div className="space-y-2">
-              {[
-                ['✨', '#fbbf24', 'Gemini Flash', 'structured 10-field query rewriting'],
-                ['🔁', '#34d399', 'CRAG', 'self-correcting RAG (Correct / Ambiguous / Incorrect)'],
-                ['📋', '#60a5fa', 'BMC', 'Business Model Canvas — all 9 blocks'],
-                ['💰', '#a78bfa', 'Budget', 'phase-wise estimate with charts'],
-                ['📣', '#f87171', 'GTM Strategy', '+ 12-month milestone timeline'],
-                ['🏛️', '#34d399', 'Govt Schemes', 'DPIIT, MSME, Startup India via IBM Granite'],
-                ['🏆', '#fbbf24', 'Competitors', 'real Indian companies with market share'],
-                ['⚠️', '#f87171', 'Risk Matrix', 'probability × severity + mitigations'],
-              ].map(([icon, color, bold, rest]) => (
-                <div key={bold} className="flex items-start gap-2 text-[0.79rem] text-slate-500">
-                  <span style={{ color }} className="flex-shrink-0 mt-px">{icon}</span>
-                  <span><b className="text-slate-200">{bold}</b> — {rest}</span>
+          {/* Sign In Form */}
+          {tab === 'signin' && (
+            <form onSubmit={handleSignIn} className="space-y-3.5 animate-fade-in" noValidate={false}>
+              <div>
+                <label
+                  htmlFor="signin-email"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Email Address
+                </label>
+                <input
+                  id="signin-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="founder@example.com"
+                  value={form.email}
+                  onChange={setField('email')}
+                  required
+                  disabled={loading}
+                  className="input-base px-4 py-2.5 text-sm"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="signin-password"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="signin-password"
+                    type={showPw ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    placeholder="••••••••"
+                    value={form.password}
+                    onChange={setField('password')}
+                    required
+                    disabled={loading}
+                    className="input-base px-4 py-2.5 pr-10 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPw(!showPw)}
+                    aria-label={showPw ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-1 cursor-pointer"
+                  >
+                    {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
                 </div>
-              ))}
+              </div>
+
+              <button
+                type="submit"
+                id="signin-submit-btn"
+                disabled={loading || googleLoading}
+                className="btn-primary w-full py-3 flex items-center justify-center gap-2 mt-2 text-xs font-700"
+              >
+                {loading ? (
+                  <Spinner size={16} />
+                ) : (
+                  <>
+                    <span>Sign In</span>
+                    <ArrowRight size={15} />
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+
+          {/* Register Form */}
+          {tab === 'register' && (
+            <form onSubmit={handleRegister} className="space-y-3.5 animate-fade-in" noValidate={false}>
+              <div>
+                <label
+                  htmlFor="reg-name"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Full Name
+                </label>
+                <input
+                  id="reg-name"
+                  type="text"
+                  autoComplete="name"
+                  placeholder="Priya Sharma"
+                  value={form.name}
+                  onChange={setField('name')}
+                  required
+                  disabled={loading}
+                  className="input-base px-4 py-2.5 text-sm"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="reg-email"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Email Address
+                </label>
+                <input
+                  id="reg-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="founder@example.com"
+                  value={form.email}
+                  onChange={setField('email')}
+                  required
+                  disabled={loading}
+                  className="input-base px-4 py-2.5 text-sm"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="reg-password"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Password (min. 6 characters)
+                </label>
+                <div className="relative">
+                  <input
+                    id="reg-password"
+                    type={showPw ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    placeholder="Create a strong password"
+                    value={form.password}
+                    onChange={setField('password')}
+                    required
+                    minLength={6}
+                    disabled={loading}
+                    className="input-base px-4 py-2.5 pr-10 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPw(!showPw)}
+                    aria-label={showPw ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-1 cursor-pointer"
+                  >
+                    {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="reg-confirm"
+                  className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5"
+                >
+                  Confirm Password
+                </label>
+                <div className="relative">
+                  <input
+                    id="reg-confirm"
+                    type={showConfirmPw ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    placeholder="Re-enter your password"
+                    value={form.confirm}
+                    onChange={setField('confirm')}
+                    required
+                    minLength={6}
+                    disabled={loading}
+                    className="input-base px-4 py-2.5 pr-10 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPw(!showConfirmPw)}
+                    aria-label={showConfirmPw ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-1 cursor-pointer"
+                  >
+                    {showConfirmPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                id="register-submit-btn"
+                disabled={loading || googleLoading}
+                className="btn-primary w-full py-3 flex items-center justify-center gap-2 mt-2 text-xs font-700"
+              >
+                {loading ? (
+                  <Spinner size={16} />
+                ) : (
+                  <>
+                    <span>Create Account</span>
+                    <ArrowRight size={15} />
+                  </>
+                )}
+              </button>
+            </form>
+          )}
+
+          {/* Feature Highlights Footer */}
+          <div className="bg-blue-500/[0.036] border border-blue-500/[0.092] rounded-2xl p-4 mt-5">
+            <div className="text-[0.67rem] font-700 text-slate-500 uppercase tracking-wider mb-2.5">
+              What you can generate
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[0.74rem] text-slate-400">
+              <div className="flex items-center gap-1.5">
+                <span className="text-amber-400">✨</span>
+                <span>Gemini Query Brief</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-emerald-400">🔁</span>
+                <span>Self-Correcting CRAG</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-blue-400">📋</span>
+                <span>9-Block Canvas</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-purple-400">💰</span>
+                <span>Phase-wise Budget</span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  )
-}
-
-// ── Local helper ──────────────────────────────────────────────────────────────
-function InputField({ label, ...props }) {
-  return (
-    <div>
-      <label className="block text-[0.69rem] font-700 text-slate-500 uppercase tracking-wider mb-1.5">
-        {label}
-      </label>
-      <input className="input-base px-4 py-3" {...props} />
     </div>
   )
 }

@@ -22,6 +22,13 @@ class RegisterRequest(BaseModel):
 
 class GoogleCallbackRequest(BaseModel):
     code: str = Field(..., description="Google OAuth authorization code")
+    redirect_uri: Optional[str] = Field(None, description="OAuth redirect URI used in initial authorization")
+    state: Optional[str] = Field(None, description="CSRF state parameter")
+
+
+class GoogleAuthUrlResponse(BaseModel):
+    url: str
+    state: str
 
 
 class UserOut(BaseModel):

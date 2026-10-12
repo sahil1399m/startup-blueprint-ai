@@ -4,6 +4,7 @@ import ProtectedRoute from './components/layout/ProtectedRoute'
 import Navbar from './components/layout/Navbar'
 import Footer from './components/layout/Footer'
 import Login from './pages/Login'
+import AuthCallback from './pages/AuthCallback'
 import Home from './pages/Home'
 import Dashboard from './pages/Dashboard'
 import Blueprint from './pages/Blueprint'
@@ -31,18 +32,26 @@ export default function App() {
   const hydrate = useAuthStore((s) => s.hydrate)
 
   // Refresh user profile (name, blueprints_generated) on app mount
-  useEffect(() => { hydrate() }, [])
+  useEffect(() => { hydrate() }, [hydrate])
 
   return (
     <BrowserRouter>
       <Routes>
-        {/* Public */}
+        {/* Public Routes */}
+        <Route
+          path="/"
+          element={<Navigate to={isLoggedIn ? '/dashboard' : '/login'} replace />}
+        />
         <Route
           path="/login"
-          element={isLoggedIn ? <Navigate to="/home" replace /> : <Login />}
+          element={isLoggedIn ? <Navigate to="/dashboard" replace /> : <Login />}
+        />
+        <Route
+          path="/auth/callback"
+          element={<AuthCallback />}
         />
 
-        {/* Protected — all wrapped in Layout with Navbar + Footer */}
+        {/* Protected Routes — wrapped in Layout with Navbar + Footer */}
         <Route path="/home" element={
           <ProtectedRoute>
             <Layout><Home /></Layout>
@@ -89,8 +98,8 @@ export default function App() {
           </ProtectedRoute>
         } />
 
-        {/* Fallback */}
-        <Route path="*" element={<Navigate to={isLoggedIn ? '/home' : '/login'} replace />} />
+        {/* Fallback Catch-All */}
+        <Route path="*" element={<Navigate to={isLoggedIn ? '/dashboard' : '/login'} replace />} />
       </Routes>
     </BrowserRouter>
   )
