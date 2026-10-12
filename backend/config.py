@@ -59,8 +59,14 @@ class Settings(BaseSettings):
 
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins, e.g.
-    # "http://localhost:5173,https://your-vercel-app.vercel.app"
-    ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    # "http://localhost:5173,https://startup-blueprint-ai.vercel.app"
+    ALLOWED_ORIGINS: str = (
+        "https://startup-blueprint-ai.vercel.app,"
+        "https://www.startup-blueprint-ai.vercel.app,"
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173,"
+        "http://localhost:3000"
+    )
 
     model_config = SettingsConfigDict(
         env_file="../.env",
@@ -71,7 +77,24 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> list[str]:
-        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+        raw_origins = [o.strip().rstrip("/") for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+        essential_origins = [
+            "https://startup-blueprint-ai.vercel.app",
+            "https://www.startup-blueprint-ai.vercel.app",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+        ]
+        if self.FRONTEND_URL:
+            clean_fe = self.FRONTEND_URL.strip().rstrip("/")
+            if clean_fe and clean_fe not in essential_origins:
+                essential_origins.append(clean_fe)
+
+        result: list[str] = []
+        for o in raw_origins + essential_origins:
+            if o and o not in result:
+                result.append(o)
+        return result
 
     @property
     def is_production(self) -> bool:

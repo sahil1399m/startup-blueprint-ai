@@ -1,6 +1,7 @@
 import axios from 'axios'
 
-const BASE_URL = import.meta.env.VITE_API_URL || ''
+const PROD_API_URL = 'https://startup-blueprint-ai-production-c87b.up.railway.app'
+const BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? PROD_API_URL : '')
 
 const client = axios.create({
   baseURL: BASE_URL,
